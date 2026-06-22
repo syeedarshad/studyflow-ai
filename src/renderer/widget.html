@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>StudyFlow Widget</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%;
+      font-family: 'Inter', system-ui, sans-serif;
+      background: transparent;
+      overflow: hidden;
+      user-select: none;
+    }
+
+    .widget {
+      background: rgba(15, 12, 35, 0.92);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(120, 100, 255, 0.35);
+      border-radius: 16px;
+      width: 260px;
+      cursor: move;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5), 0 0 0 1px rgba(108,99,255,0.1);
+      overflow: hidden;
+      transition: all 0.2s ease;
+    }
+
+    .widget-header {
+      background: linear-gradient(90deg, rgba(108,99,255,0.2), rgba(0,212,255,0.1));
+      padding: 10px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid rgba(120,100,255,0.2);
+    }
+
+    .widget-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: #9090cc;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .widget-controls {
+      display: flex;
+      gap: 6px;
+    }
+
+    .w-btn {
+      width: 18px; height: 18px;
+      border-radius: 50%;
+      border: none;
+      cursor: pointer;
+      font-size: 9px;
+      display: flex; align-items: center; justify-content: center;
+      transition: opacity 0.15s;
+      color: rgba(255,255,255,0.7);
+    }
+    .w-btn:hover { opacity: 0.8; }
+    .w-expand { background: rgba(0, 212, 255, 0.3); }
+    .w-close { background: rgba(255, 80, 80, 0.3); }
+
+    .widget-body {
+      padding: 12px 14px;
+    }
+
+    .streak-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .streak-fire { font-size: 18px; }
+    .streak-info { flex: 1; }
+    .streak-label { font-size: 10px; color: #7070a0; text-transform: uppercase; letter-spacing: 0.5px; }
+    .streak-value { font-size: 16px; font-weight: 800; color: #ff8c42; font-family: 'JetBrains Mono', monospace; }
+
+    .divider { height: 1px; background: rgba(120,100,255,0.15); margin: 8px 0; }
+
+    .task-row { margin-bottom: 8px; }
+    .task-row-label { font-size: 10px; color: #7070a0; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px; }
+    .task-row-value { font-size: 13px; font-weight: 600; color: #d0d0f0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .task-row-value.muted { color: #5050a0; font-style: italic; font-weight: 400; }
+
+    .stats-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .stat-mini { text-align: center; background: rgba(255,255,255,0.04); border-radius: 8px; padding: 8px 4px; }
+    .stat-mini-val { font-size: 15px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+    .stat-mini-lbl { font-size: 10px; color: #7070a0; margin-top: 2px; }
+
+    .progress-row { margin-top: 10px; }
+    .progress-label { display: flex; justify-content: space-between; font-size: 11px; color: #7070a0; margin-bottom: 4px; }
+    .progress-track { height: 5px; background: rgba(120,100,255,0.15); border-radius: 3px; overflow: hidden; }
+    .progress-fill { height: 100%; border-radius: 3px; background: linear-gradient(90deg, #6c63ff, #00d4ff); transition: width 0.5s ease; }
+
+    .widget.collapsed .widget-body { display: none; }
+    .widget.collapsed { border-radius: 12px; }
+
+    .xp-color { color: #00d4ff; }
+    .progress-color { color: #6c63ff; }
+  </style>
+</head>
+<body>
+  <div class="widget" id="widget">
+    <div class="widget-header" id="drag-handle">
+      <span class="widget-title">⚡ StudyFlow AI</span>
+      <div class="widget-controls">
+        <button class="w-btn w-expand" id="btn-expand" title="Toggle">◈</button>
+        <button class="w-btn w-close" id="btn-close" title="Close Widget">✕</button>
+      </div>
+    </div>
+
+    <div class="widget-body" id="widget-body">
+      <div class="streak-row">
+        <div class="streak-fire">🔥</div>
+        <div class="streak-info">
+          <div class="streak-label">Study Streak</div>
+          <div class="streak-value" id="w-streak">0 Days</div>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="task-row">
+        <div class="task-row-label">Current Task</div>
+        <div class="task-row-value" id="w-current">No task scheduled</div>
+      </div>
+      <div class="task-row">
+        <div class="task-row-label">Next Up</div>
+        <div class="task-row-value muted" id="w-next">—</div>
+      </div>
+
+      <div class="stats-row">
+        <div class="stat-mini">
+          <div class="stat-mini-val xp-color" id="w-xp">0/100</div>
+          <div class="stat-mini-lbl">XP Today</div>
+        </div>
+        <div class="stat-mini">
+          <div class="stat-mini-val progress-color" id="w-progress">0%</div>
+          <div class="stat-mini-lbl">Progress</div>
+        </div>
+      </div>
+
+      <div class="progress-row">
+        <div class="progress-label">
+          <span>Daily Goal</span>
+          <span id="w-progress-text">0%</span>
+        </div>
+        <div class="progress-track">
+          <div class="progress-fill" id="w-progress-bar" style="width:0%"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let isDragging = false;
+    let dragStart = { x: 0, y: 0 };
+    let collapsed = false;
+
+    document.getElementById('btn-expand').addEventListener('click', () => {
+      collapsed = !collapsed;
+      document.getElementById('widget').classList.toggle('collapsed', collapsed);
+    });
+
+    document.getElementById('btn-close').addEventListener('click', () => {
+      window.close();
+    });
+
+    // Drag
+    const handle = document.getElementById('drag-handle');
+    handle.addEventListener('mousedown', (e) => {
+      isDragging = true;
+      dragStart = { x: e.screenX, y: e.screenY };
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!isDragging) return;
+      const dx = e.screenX - dragStart.x;
+      const dy = e.screenY - dragStart.y;
+      dragStart = { x: e.screenX, y: e.screenY };
+      window.studyflow.moveWidget(0, 0); // Will need screen position
+    });
+
+    document.addEventListener('mouseup', () => { isDragging = false; });
+
+    async function refresh() {
+      try {
+        const res = await window.studyflow.getWidgetData();
+        if (!res) return;
+        const d = res;
+
+        document.getElementById('w-streak').textContent = `${d.streak} Day${d.streak !== 1 ? 's' : ''}`;
+        document.getElementById('w-current').textContent = d.currentTask ? d.currentTask.title : 'No task pending';
+        document.getElementById('w-current').className = `task-row-value${d.currentTask ? '' : ' muted'}`;
+        document.getElementById('w-next').textContent = d.nextTask ? d.nextTask.title : '—';
+        document.getElementById('w-xp').textContent = `${d.todayXP}/${d.goalXP}`;
+        document.getElementById('w-progress').textContent = `${d.progress}%`;
+        document.getElementById('w-progress-text').textContent = `${d.progress}%`;
+        document.getElementById('w-progress-bar').style.width = `${d.progress}%`;
+      } catch (e) {}
+    }
+
+    refresh();
+    setInterval(refresh, 30000);
+
+    window.studyflow.onRefresh(refresh);
+  </script>
+</body>
+</html>
