@@ -14,6 +14,8 @@ const { app } = require('electron');
 const ExamRepository = require('./repositories/exam-repository');
 const RoadmapRepository = require('./repositories/roadmap-repository');
 const GoalRepository = require('./repositories/goal-repository');
+const AnalyticsRepository = require('./repositories/analytics-repository');
+const NotesRepository = require('./repositories/notes-repository');
 
 let Database;
 try {
@@ -36,6 +38,8 @@ class StudyFlowDB {
     this.examRepository = new ExamRepository(this.db);
     this.roadmapRepository = new RoadmapRepository(this.db);
     this.goalRepository = new GoalRepository(this.db);
+    this.analyticsRepository = new AnalyticsRepository(this.db);
+    this.notesRepository = new NotesRepository(this.db);
     this.init();
   }
 
@@ -360,19 +364,7 @@ class StudyFlowDB {
   // ═══════════════════════════════════════════════════════════════════════
 
   getFocusModeStats() {
-    const allTime = this.db.prepare(`
-      SELECT COALESCE(SUM(duration_minutes),0) as total_minutes, COUNT(*) as session_count
-      FROM sessions WHERE is_focus_mode = 1
-    `).get();
-    const todayRow = this.db.prepare(`
-      SELECT COALESCE(SUM(duration_minutes),0) as total_minutes
-      FROM sessions WHERE is_focus_mode = 1 AND date(started_at) = date('now')
-    `).get();
-    return {
-      allTimeMinutes:  allTime.total_minutes,
-      allTimeSessions: allTime.session_count,
-      todayMinutes:    todayRow.total_minutes
-    };
+    return this.analyticsRepository.getFocusModeStats();
   }
 
   ensureStreak() {
@@ -431,11 +423,7 @@ class StudyFlowDB {
   }
 
   getXPTrend() {
-    return this.db.prepare(`
-      SELECT date(earned_at) as date, SUM(amount) as xp
-      FROM xp_log WHERE earned_at >= datetime('now','-14 days')
-      GROUP BY date(earned_at) ORDER BY date ASC
-    `).all();
+    return this.analyticsRepository.getXPTrend();
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -660,34 +648,15 @@ class StudyFlowDB {
   }
 
   getWeeklyStats() {
-    return this.db.prepare(`
-      SELECT date(due_date) as date,
-             COUNT(*) as total,
-             SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed,
-             COALESCE(SUM(estimated_minutes),0) as planned_minutes
-      FROM tasks
-      WHERE due_date >= date('now','-6 days') AND status != 'deleted'
-      GROUP BY date(due_date) ORDER BY date ASC
-    `).all();
+    return this.analyticsRepository.getWeeklyStats();
   }
 
   getMonthlyStats() {
-    return this.db.prepare(`
-      SELECT date(started_at) as date, COALESCE(SUM(duration_minutes),0) as total_minutes
-      FROM sessions WHERE started_at >= datetime('now','-29 days')
-      GROUP BY date(started_at) ORDER BY date ASC
-    `).all();
+    return this.analyticsRepository.getMonthlyStats();
   }
 
   getCategoryStats() {
-    return this.db.prepare(`
-      SELECT category,
-             COUNT(*) as task_count,
-             SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed_count,
-             COALESCE(SUM(xp_reward),0) as total_xp
-      FROM tasks WHERE status != 'deleted'
-      GROUP BY category
-    `).all();
+    return this.analyticsRepository.getCategoryStats();
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -702,10 +671,7 @@ class StudyFlowDB {
   }
 
   getTodayStudyMinutes() {
-    return this.db.prepare(`
-      SELECT COALESCE(SUM(duration_minutes),0) as total
-      FROM sessions WHERE date(started_at) = date('now')
-    `).get().total;
+    return this.analyticsRepository.getTodayStudyMinutes();
   }
 
   getTodaySessions() {
@@ -719,30 +685,19 @@ class StudyFlowDB {
   // ═══════════════════════════════════════════════════════════════════════
 
   getNotes(search = '') {
-    if (search) {
-      return this.db.prepare(`
-        SELECT * FROM notes WHERE title LIKE ? OR content LIKE ?
-        ORDER BY is_pinned DESC, updated_at DESC
-      `).all(`%${search}%`, `%${search}%`);
-    }
-    return this.db.prepare('SELECT * FROM notes ORDER BY is_pinned DESC, updated_at DESC').all();
+    return this.notesRepository.getNotes(search);
   }
 
-  addNote({ title, content, is_pinned = 0 }) {
-    const result = this.db.prepare(
-      'INSERT INTO notes (title, content, is_pinned) VALUES (?, ?, ?)'
-    ).run(title, content, is_pinned ? 1 : 0);
-    return this.db.prepare('SELECT * FROM notes WHERE id = ?').get(result.lastInsertRowid);
+  addNote(data) {
+    return this.notesRepository.addNote(data);
   }
 
-  updateNote(id, { title, content, is_pinned }) {
-    return this.db.prepare(`
-      UPDATE notes SET title=?, content=?, is_pinned=?, updated_at=datetime('now') WHERE id=?
-    `).run(title, content, is_pinned ? 1 : 0, id);
+  updateNote(id, data) {
+    return this.notesRepository.updateNote(id, data);
   }
 
   deleteNote(id) {
-    return this.db.prepare('DELETE FROM notes WHERE id = ?').run(id);
+    return this.notesRepository.deleteNote(id);
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -1184,9 +1139,7 @@ class StudyFlowDB {
   }
 
   getScoreHistory(days = 14) {
-    return this.db.prepare(`
-      SELECT * FROM productivity_scores WHERE date >= date('now', '-' || ? || ' days') ORDER BY date ASC
-    `).all(days);
+    return this.analyticsRepository.getScoreHistory(days);
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -1194,56 +1147,7 @@ class StudyFlowDB {
   // ═══════════════════════════════════════════════════════════════════════
 
   getWeeklyReviewStats() {
-    const sessionRow = this.db.prepare(`
-      SELECT COALESCE(SUM(duration_minutes),0) as total_minutes, COUNT(*) as session_count
-      FROM sessions WHERE date(started_at) >= date('now','-6 days')
-    `).get();
-
-    const tasksRow = this.db.prepare(`
-      SELECT COUNT(*) as completed_count FROM tasks
-      WHERE status='completed' AND date(completed_at) >= date('now','-6 days')
-    `).get();
-
-    const tasksDueRow = this.db.prepare(`
-      SELECT COUNT(*) as total_due FROM tasks
-      WHERE status != 'deleted'
-        AND due_date IS NOT NULL AND due_date != ''
-        AND date(due_date) >= date('now','-6 days') AND date(due_date) <= date('now')
-    `).get();
-
-    const xpRow = this.db.prepare(`
-      SELECT COALESCE(SUM(amount),0) as total_xp FROM xp_log WHERE date(earned_at) >= date('now','-6 days')
-    `).get();
-
-    const dailyBreakdown = this.db.prepare(`
-      SELECT d.date,
-             COALESCE(s.minutes,0)    as focus_minutes,
-             COALESCE(t.completed,0)  as tasks_completed,
-             COALESCE(x.xp,0)         as xp_earned
-      FROM (
-        SELECT date('now', '-' || n || ' days') as date
-        FROM (SELECT 0 as n UNION SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5 UNION SELECT 6)
-      ) d
-      LEFT JOIN (SELECT date(started_at) as date, SUM(duration_minutes) as minutes FROM sessions GROUP BY date(started_at)) s ON s.date=d.date
-      LEFT JOIN (SELECT date(completed_at) as date, COUNT(*) as completed FROM tasks WHERE status='completed' GROUP BY date(completed_at)) t ON t.date=d.date
-      LEFT JOIN (SELECT date(earned_at) as date, SUM(amount) as xp FROM xp_log GROUP BY date(earned_at)) x ON x.date=d.date
-      ORDER BY d.date ASC
-    `).all();
-
-    const completionRate = tasksDueRow.total_due > 0
-      ? Math.round((tasksRow.completed_count / tasksDueRow.total_due) * 100)
-      : null;
-
-    return {
-      hoursStudied:  Math.round((sessionRow.total_minutes / 60) * 10) / 10,
-      focusMinutes:  sessionRow.total_minutes,
-      sessionCount:  sessionRow.session_count,
-      tasksCompleted: tasksRow.completed_count,
-      tasksDue:      tasksDueRow.total_due,
-      completionRate,
-      xpEarned:      xpRow.total_xp,
-      dailyBreakdown
-    };
+    return this.analyticsRepository.getWeeklyReviewStats();
   }
 
   getWeeklyReview() {
@@ -1454,7 +1358,7 @@ class StudyFlowDB {
     const activeGoals = this.db.prepare(`SELECT id FROM goals WHERE status='active'`).all();
     if (activeGoals.length > 0) {
       const paceScores = activeGoals.map(g => {
-        const ins = this.computeGoalInsights(this.getGoal(g.id));
+        const ins = this.goalRepository.computeGoalInsights(this.getGoal(g.id));
         if (ins.paceStatus === 'ahead')    return 1;
         if (ins.paceStatus === 'on_track') return 0.75;
         if (ins.paceStatus === 'behind')   return 0.35;

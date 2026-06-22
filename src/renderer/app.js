@@ -414,6 +414,10 @@ async function renderDashboard(container) {
       <div>
         <div class="page-title">Good ${getGreeting()}, ${settings.user_name || 'Student'} 👋</div>
         <div class="page-subtitle">${new Date().toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'})}</div>
+        <div style="margin-top:16px;font-size:14px;color:var(--text-2);line-height:1.6;font-style:italic">
+          <div style="font-weight:600;color:var(--text);margin-bottom:4px;font-style:normal">💡 Daily Motivation</div>
+          "${getDailyQuote()}"
+        </div>
       </div>
       <button class="btn btn-primary" data-action="showAddTaskModal">＋ Add Task</button>
     </div>
@@ -485,13 +489,6 @@ async function renderDashboard(container) {
           <div class="card-title">⏱ Quick Focus</div>
           <div style="font-size:13px;color:var(--text-2);margin-bottom:10px">Start a focus session to earn XP</div>
           <button class="btn btn-primary" style="width:100%" data-action="navigateTo" data-page="focus" data-stop-propagation="true">Start Focus Session</button>
-        </div>
-
-        <div class="card">
-          <div class="card-title">💭 Daily Quote</div>
-          <div style="font-size:13px;color:var(--text-2);line-height:1.6;font-style:italic">
-            "${getDailyQuote()}"
-          </div>
         </div>
       </div>
     </div>
