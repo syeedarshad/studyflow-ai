@@ -11,6 +11,7 @@
 
 const path = require('path');
 const { app } = require('electron');
+const ExamRepository = require('./repositories/exam-repository');
 
 let Database;
 try {
@@ -30,6 +31,7 @@ class StudyFlowDB {
 
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
+    this.examRepository = new ExamRepository(this.db);
     this.init();
   }
 
@@ -1755,17 +1757,20 @@ class StudyFlowDB {
   // EXAM PREPARATION
   // ═══════════════════════════════════════════════════════════════════════
 
-  addExamPrep({ examName, examDate, description }) {
-    const result = this.db.prepare(`INSERT INTO exam_preps (exam_name,exam_date,description) VALUES (?,?,?)`).run(examName, examDate||null, description||'');
-    return this.db.prepare('SELECT * FROM exam_preps WHERE id=?').get(result.lastInsertRowid);
+  addExamPrep(data) {
+    return this.examRepository.addExamPrep(data);
   }
 
   getAllExamPreps() {
-    return this.db.prepare(`SELECT * FROM exam_preps WHERE status!='deleted' ORDER BY exam_date ASC`).all();
+    return this.examRepository.getAllExamPreps();
   }
 
   deleteExamPrep(id) {
-    this.db.prepare(`UPDATE exam_preps SET status='deleted' WHERE id=?`).run(id);
+    return this.examRepository.deleteExamPrep(id);
+  }
+
+  getAcceptedExamPlan(id) {
+    return this.examRepository.getAcceptedExamPlan(id);
   }
 
   // ═══════════════════════════════════════════════════════════════════════

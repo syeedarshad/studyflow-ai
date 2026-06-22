@@ -746,6 +746,15 @@ function setupIPC() {
     }
   });
 
+  ipcMain.handle('exam-get-plan', (e, id) => {
+    try {
+      const data = db.getAcceptedExamPlan(id);
+      return { success: true, data };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
   ipcMain.handle('exam-plan-preview', async (e, { examName, examDate, description }) => {
     try {
       const daysUntilExam = examDate

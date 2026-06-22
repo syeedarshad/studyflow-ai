@@ -98,6 +98,7 @@ contextBridge.exposeInMainWorld('studyflow', {
   // ─── Feature 2 — AI Exam Preparation System ──────────────────────────
   examGetAll:      ()       => ipcRenderer.invoke('exam-get-all'),
   examDelete:      (id)     => ipcRenderer.invoke('exam-delete',       id),
+  examGetPlan:     (id)     => ipcRenderer.invoke('exam-get-plan',     id),
   examPlanPreview: (params) => ipcRenderer.invoke('exam-plan-preview', params),
   examPlanAccept:  (planId) => ipcRenderer.invoke('exam-plan-accept',  planId),
   examPlanReject:  (planId) => ipcRenderer.invoke('exam-plan-reject',  planId),

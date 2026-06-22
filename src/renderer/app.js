@@ -90,7 +90,7 @@ const ACTION_MAP = {
   rejectRoadmapPlan:       (planId) => rejectRoadmapPlan(planId),
   rejectRoadmapPlanCancel: (planId) => { rejectRoadmapPlan(planId); closeModal(); },
   acceptRoadmapPlan:       (planId) => acceptRoadmapPlan(planId),
-  showExamCreateModal:     () => showExamCreateModal(),
+  openExam:                (examId) => openExam(examId),
   deleteExam:              (examId) => deleteExam(examId),
   generateExamPlanPreview: () => generateExamPlanPreview(),
   rejectExamPlan:          (planId) => rejectExamPlan(planId),
@@ -142,6 +142,7 @@ function collectActionArgs(el, action) {
     case 'rejectRoadmapPlan': return [Number(d.planId)];
     case 'rejectRoadmapPlanCancel': return [Number(d.planId)];
     case 'acceptRoadmapPlan': return [Number(d.planId)];
+    case 'openExam': return [Number(d.examId)];
     case 'deleteExam': return [Number(d.examId)];
     case 'rejectExamPlan': return [Number(d.planId)];
     case 'rejectExamPlanCancel': return [Number(d.planId)];
@@ -334,6 +335,20 @@ function formatDate(dateStr) {
   if (diff === 1)  return 'Tomorrow';
   if (diff === -1) return 'Yesterday';
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function formatRelativeTime(dateStr) {
+  if (!dateStr) return '';
+  const d = new Date(dateStr.replace(' ', 'T') + 'Z');
+  if (isNaN(d.getTime())) return '';
+  const diffMins = Math.floor((new Date() - d) / 60000);
+  if (diffMins < 1) return 'Created just now';
+  if (diffMins < 60) return `Created ${diffMins} min ago`;
+  const diffHours = Math.floor(diffMins / 60);
+  if (diffHours < 24) return `Created ${diffHours} hour${diffHours > 1 ? 's' : ''} ago`;
+  const diffDays = Math.floor(diffHours / 24);
+  if (diffDays === 1) return 'Created yesterday';
+  return `Created ${diffDays} days ago`;
 }
 
 // ─── Escape helpers for inline onclick strings ────────────────────────────────
@@ -787,7 +802,8 @@ function renderTaskItem(task) {
         <div class="task-meta">
           <span class="task-category cat-${task.category.toLowerCase().replace(/\s+/g,'_')}">${task.category}</span>
           <span style="color:${prioColors[task.priority]||'var(--text-3)'}">● ${task.priority}</span>
-          ${task.due_date ? `<span>${formatDate(task.due_date)}</span>` : ''}
+          ${task.due_date ? `<span title="Due Date">📅 ${formatDate(task.due_date)}</span>` : ''}
+          ${task.created_at ? `<span title="Created At" style="color:var(--text-3);font-style:italic">${formatRelativeTime(task.created_at)}</span>` : ''}
           ${task.estimated_minutes ? `<span>~${task.estimated_minutes}m</span>` : ''}
         </div>
       </div>
@@ -2205,14 +2221,14 @@ async function renderExamPrep(container) {
     ` : `
       <div style="display:flex;flex-direction:column;gap:16px">
         ${exams.map(e => `
-          <div class="card">
+          <div class="card card-hover" style="cursor:pointer" data-action="openExam" data-exam-id="${e.id}">
             <div style="display:flex;justify-content:space-between;align-items:center">
               <div>
                 <div style="font-size:15px;font-weight:700;color:var(--text)">${e.exam_name}</div>
                 <div style="font-size:12px;color:var(--text-3)">${e.exam_date ? `Exam date: ${formatDate(e.exam_date)}` : 'No exam date set'}</div>
                 ${e.description ? `<div style="font-size:12px;color:var(--text-2);margin-top:4px">${e.description}</div>` : ''}
               </div>
-              <button class="btn btn-ghost btn-sm" style="color:var(--danger)" data-action="deleteExam" data-exam-id="${e.id}">🗑</button>
+              <button class="btn btn-ghost btn-sm" style="color:var(--danger)" data-action="deleteExam" data-exam-id="${e.id}" data-stop-propagation="true">🗑</button>
             </div>
           </div>
         `).join('')}
@@ -2311,6 +2327,51 @@ async function deleteExam(id) {
   await window.studyflow.examDelete(id);
   toast('Exam prep deleted', 'info');
   await navigateTo('exam');
+}
+
+async function openExam(examId) {
+  try {
+    const res = await window.studyflow.examGetPlan(examId);
+    if (!res.success || !res.data) {
+      toast(res.error || 'No detailed plan found for this exam.', 'error');
+      return;
+    }
+
+    const { exam, plan, tasks } = res.data;
+    
+    const overview = plan?.overview || 'No overview provided.';
+    const dailyActivities = Array.isArray(plan?.dailyActivities) ? plan.dailyActivities.map(a => `• ${a}`).join('<br>') : (plan?.dailyActivities || 'None');
+    const revisionTopics = Array.isArray(plan?.revisionTopics) ? plan.revisionTopics.map(r => `• ${r}`).join('<br>') : (plan?.revisionTopics || 'None');
+
+    showModal(`📘 ${exam.exam_name}`, `
+      <div style="margin-bottom:12px;font-size:13px;color:var(--text-3)">
+        <strong>Exam Date:</strong> ${exam.exam_date ? formatDate(exam.exam_date) : 'Not set'}
+      </div>
+      <div style="margin-bottom:14px;font-size:14px;color:var(--text-2)">
+        <strong>Overview:</strong><br>
+        <span style="font-size:13px">${overview}</span>
+      </div>
+      <div style="margin-bottom:14px;font-size:14px;color:var(--text-2)">
+        <strong>Daily Activities:</strong><br>
+        <span style="font-size:13px">${dailyActivities}</span>
+      </div>
+      <div style="margin-bottom:14px;font-size:14px;color:var(--text-2)">
+        <strong>Revision Topics:</strong><br>
+        <span style="font-size:13px">${revisionTopics}</span>
+      </div>
+      <div style="margin-top:16px;font-size:14px;color:var(--text-2)">
+        <strong>Generated Tasks (${(tasks || []).length}):</strong>
+        <div style="max-height:200px;overflow-y:auto;background:var(--surface-2);padding:10px;border-radius:6px;margin-top:8px;">
+          ${(tasks || []).map(t => `<div style="font-size:12px;margin-bottom:4px;">🔸 ${t.title} <span style="color:var(--text-3)">(${t.category})</span></div>`).join('') || '<div style="font-size:12px">No tasks found.</div>'}
+        </div>
+      </div>
+      <div style="margin-top:20px;text-align:right">
+        <button class="btn btn-secondary" data-action="closeModal">Close</button>
+      </div>
+    `);
+  } catch (err) {
+    toast('Error loading exam details', 'error');
+  }
 }
 
 // ═══════════════════════════════════════════════════════════
