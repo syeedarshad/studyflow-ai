@@ -19,8 +19,7 @@ function callGroq(apiKey, prompt) {
         { role: 'system', content: 'You are a planning assistant. Always respond with valid JSON only, no markdown fences, no explanation.' },
         { role: 'user', content: prompt }
       ],
-      temperature: 0.4,
-      response_format: { type: 'json_object' }
+      temperature: 0.4
     });
 
     const options = {

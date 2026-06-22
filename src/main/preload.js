@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld('studyflow', {
   planPreviewTasks:    (prompt)      => ipcRenderer.invoke('plan-preview-tasks',    prompt),
   planPreviewSchedule: (params)      => ipcRenderer.invoke('plan-preview-schedule', params),
   planPreviewReplan:   (instruction) => ipcRenderer.invoke('plan-preview-replan',   instruction),
+  hybridPlanPreview:   (params)      => ipcRenderer.invoke('hybrid-plan-preview',   params),
   planAccept:          (planId)      => ipcRenderer.invoke('plan-accept',            planId),
   planReject:          (planId)      => ipcRenderer.invoke('plan-reject',            planId),
 

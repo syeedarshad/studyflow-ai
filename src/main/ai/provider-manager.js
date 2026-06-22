@@ -97,6 +97,9 @@ class ProviderManager {
     if (context.energyPattern) {
       lines.push(`Known energy pattern: ${JSON.stringify(context.energyPattern)}.`);
     }
+    if (context.preferredStudyHours) {
+      lines.push(`Preferred study hours: ${context.preferredStudyHours}.`);
+    }
     if (context.currentGoals) {
       lines.push(`Current goals: ${JSON.stringify(context.currentGoals)}.`);
     }

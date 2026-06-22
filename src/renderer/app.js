@@ -315,12 +315,107 @@ function formatProviderLabel(provider) {
   return `via ${provider}`;
 }
 
-// ─── Greeting ─────────────────────────────────────────────────────────────────
-function getGreeting() {
+// ─── Greeting helpers ──────────────────────────────────────────────────────────────
+
+/**
+ * getGreetingHeader — returns a SHORT, single-line greeting with emoji + name.
+ * Never exceeds one line. Never includes coaching or context.
+ *
+ * @param {string} name - display name
+ * @returns {string}  e.g. "🌅 Good Morning, Arshad"
+ */
+function getGreetingHeader(name = 'Student') {
   const h = new Date().getHours();
-  if (h < 12) return 'Morning';
-  if (h < 17) return 'Afternoon';
-  return 'Evening';
+  if (h < 5)  return `🌙 Good Night, ${name}`;
+  if (h < 10) return `🌅 Good Morning, ${name}`;
+  if (h < 12) return `☀️ Good Morning, ${name}`;
+  if (h < 16) return `🌞 Good Afternoon, ${name}`;
+  if (h < 20) return `🌆 Good Evening, ${name}`;
+  return `🌚 Good Night, ${name}`;
+}
+
+/**
+ * getCoachingLine — returns ONE concise, motivational context sentence
+ * derived from the most relevant live data signal, or '' if no data.
+ *
+ * Priority order:
+ *   1. burnout high/moderate  → wellness message
+ *   2. exam ≤ 7 days          → urgency message
+ *   3. pending tasks > 0      → task nudge
+ *   4. goal progress ≥ 10%    → progress encouragement
+ *   5. streak ≥ 3             → streak celebration
+ *   6. XP earned today        → XP acknowledgement
+ *   7. fallback               → '' (no coaching line shown)
+ *
+ * @param {object} ctx
+ * @param {string}  ctx.burnoutRisk   - 'none'|'low'|'moderate'|'high'
+ * @param {Array}   ctx.exams         - active exams array
+ * @param {number}  ctx.pendingCount  - pending task count
+ * @param {Array}   ctx.goals         - active goals array
+ * @param {number}  ctx.streak        - streak days
+ * @param {number}  ctx.todayXP       - XP earned today
+ * @returns {string}
+ */
+function getCoachingLine({ burnoutRisk = 'none', exams = [], pendingCount = 0, goals = [], streak = 0, todayXP = 0 } = {}) {
+  // 1. Burnout — wellness always takes priority
+  if (burnoutRisk === 'high') {
+    return `Your wellbeing matters most. Keep tonight's session short and get some rest.`;
+  }
+  if (burnoutRisk === 'moderate') {
+    return `Take it steady today. Short, focused sessions work better than pushing through.`;
+  }
+
+  // 2. Upcoming exam ≤ 7 days
+  if (exams.length) {
+    const soonest = exams
+      .map(x => ({
+        ...x,
+        daysLeft: x.exam_date
+          ? Math.max(0, Math.round((new Date(x.exam_date) - new Date()) / 86400000))
+          : 999
+      }))
+      .filter(x => x.daysLeft <= 7)
+      .sort((a, b) => a.daysLeft - b.daysLeft)[0];
+    if (soonest) {
+      if (soonest.daysLeft === 0) return `Your ${soonest.exam_name} exam is TODAY — you've got this!`;
+      if (soonest.daysLeft === 1) return `Your ${soonest.exam_name} exam is tomorrow. Focus on what matters most.`;
+      return `Your ${soonest.exam_name} exam is in ${soonest.daysLeft} days. Let's make today count.`;
+    }
+  }
+
+  // 3. Pending tasks
+  if (pendingCount > 0) {
+    if (pendingCount === 1) return `You have 1 task remaining today — finish strong.`;
+    return `You have ${pendingCount} tasks remaining today. Let's get through them.`;
+  }
+
+  // 4. Goal progress (≥ 10% threshold — low values are not motivating)
+  if (goals.length) {
+    const topGoal = goals
+      .filter(g => typeof g.progress_percentage === 'number' && g.progress_percentage >= 10)
+      .sort((a, b) => b.progress_percentage - a.progress_percentage)[0];
+    if (topGoal) {
+      return `Your "${topGoal.title}" goal is ${Math.round(topGoal.progress_percentage)}% complete — keep the momentum going.`;
+    }
+  }
+
+  // 5. Streak celebration
+  if (streak >= 3) {
+    return `${streak}-day streak 🔥 — great consistency. Keep it going!`;
+  }
+
+  // 6. XP earned
+  if (todayXP > 0) {
+    return `You've earned ${todayXP} XP today — nice work!`;
+  }
+
+  // 7. No data — return empty; template will suppress the coaching row
+  return '';
+}
+
+/** Legacy alias — kept for safety. Returns short header only. */
+function buildGreeting(ctx = {}) {
+  return getGreetingHeader(ctx.name);
 }
 
 // ─── Date formatting ──────────────────────────────────────────────────────────
@@ -390,17 +485,21 @@ function closeModal() {
 // PAGE: DASHBOARD
 // ═══════════════════════════════════════════════════════════
 async function renderDashboard(container) {
-  const [tasksRes, xpRes, streakRes, settingsRes] = await Promise.all([
+  const [tasksRes, xpRes, streakRes, settingsRes, goalsRes, examsRes] = await Promise.all([
     window.studyflow.db('getTodayTasks'),
     window.studyflow.db('getTodayXP'),
     window.studyflow.db('getStreak'),
-    window.studyflow.db('getAllSettings')
+    window.studyflow.db('getAllSettings'),
+    window.studyflow.goalsGetDashboard().catch(() => ({ success: false })),
+    window.studyflow.examGetAll().catch(() => ({ success: false }))
   ]);
 
   const todayTasks = tasksRes.data  || [];
   const todayXP    = xpRes.data     || 0;
   const streak     = streakRes.data || 0;
   const settings   = settingsRes.data || {};
+  const goals      = (goalsRes.success && goalsRes.goals) ? goalsRes.goals.filter(g => g.status === 'active') : [];
+  const exams      = (examsRes.success && examsRes.exams) ? examsRes.exams.filter(x => x.status === 'active') : [];
 
   const completed  = todayTasks.filter(t => t.status === 'completed');
   const pending    = todayTasks.filter(t => t.status === 'pending');
@@ -409,12 +508,21 @@ async function renderDashboard(container) {
   const xpProgress = goalXP > 0 ? Math.min(100, (todayXP / goalXP) * 100) : 0;
   const progress   = todayTasks.length > 0 ? Math.round((completed.length / todayTasks.length) * 100) : 0;
 
+  // Burnout: read from the DOM slot if banner already loaded, else 'none'
+  const burnoutRisk = 'none'; // populated after render by loadBurnoutBanner; greeting uses cached value on next render
+
+  const greetingHeader = getGreetingHeader(settings.user_name || 'Student');
+  const coachingLine   = getCoachingLine({ burnoutRisk, exams, pendingCount: pending.length, goals, streak, todayXP });
+
   container.innerHTML = `
     <div class="page-header">
       <div>
-        <div class="page-title">Good ${getGreeting()}, ${settings.user_name || 'Student'} 👋</div>
+        <div class="page-title">${greetingHeader}</div>
         <div class="page-subtitle">${new Date().toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'})}</div>
-        <div style="margin-top:16px;font-size:14px;color:var(--text-2);line-height:1.6;font-style:italic">
+        ${coachingLine ? `
+        <div style="margin-top:8px;font-size:14px;color:var(--text-2);line-height:1.5">${coachingLine}</div>
+        ` : ''}
+        <div style="margin-top:14px;font-size:14px;color:var(--text-2);line-height:1.6;font-style:italic">
           <div style="font-weight:600;color:var(--text);margin-bottom:4px;font-style:normal">💡 Daily Motivation</div>
           "${getDailyQuote()}"
         </div>
@@ -426,13 +534,14 @@ async function renderDashboard(container) {
     <div id="coach-banner-slot"></div>
 
     <div class="card ai-shimmer" style="margin-bottom:20px">
-      <div class="card-title">🤖 AI Task Planner — describe your goals</div>
+      <div class="card-title">🤖 AI Daily Planner — organize your day</div>
       <div style="display:flex;gap:10px">
         <input class="form-input" id="ai-prompt-input"
-          placeholder="e.g. I have 3 hours tonight, need DSA practice and JS revision"
+          placeholder="e.g. I have 3 hours tonight — or — Plan my evening — or — I'm free after 6pm"
           style="flex:1"
           data-action="runAIPrompt" data-event="keydown">
         <button class="btn btn-primary" id="ai-prompt-btn" data-action="runAIPrompt">✨ Generate Tasks</button>
+        <button class="btn btn-secondary" id="hybrid-plan-btn" data-action="runHybridPlanPreview" title="Auto-reads your tasks, goals, exams and burnout status to build a smart timetable">🗓️ Plan My Day</button>
       </div>
     </div>
 
@@ -781,6 +890,25 @@ async function regeneratePlan(originalPrompt) {
   closeModal();
   toast('Regenerating plan...', 'info');
   await generateTaskPlanPreview(unescapeJS(originalPrompt), null);
+}
+
+// ═══════════════════════════════════════════════════════════
+// HYBRID DAILY PLANNER — Smart timetable from live context
+// ═══════════════════════════════════════════════════════════
+async function runHybridPlanPreview() {
+  const input  = document.getElementById('ai-prompt-input');
+  const btn    = document.getElementById('hybrid-plan-btn');
+  const prompt = input?.value.trim();
+  if (!prompt) { toast('Tell me how much time you have, e.g. "I have 2 hours tonight"', 'error'); return; }
+
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Planning...'; }
+  try {
+    const res = await window.studyflow.hybridPlanPreview({ userPrompt: prompt });
+    if (!res.success) { toast(res.error || 'Hybrid planner failed. Check your API keys.', 'error'); return; }
+    if (!res.plan?.payload?.length) { toast('AI could not build a schedule. Try rephrasing.', 'info'); return; }
+    showSchedulePlanApproval(res.plan);
+  } catch (err) { toast('Something went wrong building your plan.', 'error'); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = '🗓️ Plan My Day'; } }
 }
 
 // ═══════════════════════════════════════════════════════════

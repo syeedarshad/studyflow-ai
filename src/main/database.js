@@ -1003,12 +1003,22 @@ class StudyFlowDB {
   getAIContextSummary() {
     const memory = this.getAllMemory();
     const prefs  = this.getUserPreferences();
+
+    // Live fetch active goals directly from GoalRepository — avoids stale ai_memory reads.
+    // getGoals() already computes paceStatus and daysRemaining via computeGoalInsights().
+    const activeGoals = this.goalRepository.getGoals({ status: 'active' }).map(g => ({
+      title:         g.title,
+      progress:      g.progress_percentage,
+      paceStatus:    g.paceStatus,
+      daysRemaining: g.daysRemaining
+    }));
+
     return {
       bestFocusHours:        memory.habit_best_focus_hours      || [],
       productiveCategories:  memory.habit_productive_categories || [],
       skippedCategories:     memory.habit_skipped_categories    || [],
       preferredStudyHours:   memory.preferred_study_hours       || null,
-      currentGoals:          memory.current_goals               || null,
+      currentGoals:          activeGoals.length > 0 ? activeGoals : null,
       energyPattern:         memory.energy_pattern              || null,
       preferences:           prefs
     };
