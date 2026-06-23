@@ -16,6 +16,7 @@ const RoadmapRepository = require('./repositories/roadmap-repository');
 const GoalRepository = require('./repositories/goal-repository');
 const AnalyticsRepository = require('./repositories/analytics-repository');
 const NotesRepository = require('./repositories/notes-repository');
+const { normalizeGoalTitle } = require('./utils');
 
 let Database;
 try {
@@ -212,6 +213,19 @@ class StudyFlowDB {
       this.db.exec("ALTER TABLE tasks ADD COLUMN completed_at TEXT");
     }
 
+    // saved_sessions
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS saved_sessions (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        title            TEXT NOT NULL,
+        session_type     TEXT NOT NULL,
+        duration_minutes INTEGER NOT NULL,
+        source_prompt    TEXT NOT NULL,
+        segments         TEXT NOT NULL,
+        created_at       TEXT DEFAULT (datetime('now'))
+      );
+    `);
+
     // user_preferences
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS user_preferences (
@@ -362,6 +376,72 @@ class StudyFlowDB {
         content    TEXT NOT NULL,
         created_at TEXT DEFAULT (datetime('now'))
       );
+    `);
+
+    // ── Phase 2A: one-time cleanup of legacy duplicate recurring tasks ─────
+    // Guarded by a persistent flag in the settings table so it runs exactly
+    // once per installation, not on every startup.
+    // Must run BEFORE creating the unique index so the index creation succeeds.
+    const _p2aDone = this.db.prepare("SELECT value FROM settings WHERE key='phase2a_cleanup_done'").get();
+    if (!_p2aDone || _p2aDone.value !== '1') {
+      this.cleanupDuplicateRecurringTasks();
+      this.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('phase2a_cleanup_done', '1')").run();
+    }
+
+    // ── Phase 2A: unique index to prevent future duplicate recurring tasks ─
+    // Partial index: 'deleted' rows are excluded so a task can be recreated
+    // after being soft-deleted without violating the constraint.
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_task_unique
+      ON tasks(title, due_date, goal_id)
+      WHERE status != 'deleted';
+    `);
+    // ── Planner: ensure date is unique so INSERT OR REPLACE works correctly ─
+    // Without UNIQUE(date), each acceptance inserts a NEW row instead of
+    // replacing the existing one. getPlan then returns the first (stale) row.
+    try {
+      const deletePlannerDuplicates = this.db.transaction(() => {
+        // Keep the newest row (highest id) for each date
+        const result = this.db.prepare(`
+          DELETE FROM planner_entries
+          WHERE id NOT IN (
+            SELECT MAX(id) FROM planner_entries GROUP BY date
+          )
+        `).run();
+        return result.changes;
+      });
+      const rowsRemoved = deletePlannerDuplicates();
+      if (rowsRemoved > 0) {
+        console.log(`[STARTUP] Cleaned ${rowsRemoved} duplicate planner entries.`);
+      }
+
+      this.db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_planner_entries_date
+        ON planner_entries(date);
+      `);
+    } catch (err) {
+      console.error('[STARTUP] Failed to create unique index on planner_entries.date:', err.message);
+    }
+
+    // ── Phase 3: deduplicate and protect active goals ─
+    const goalCols = this.db.prepare("PRAGMA table_info(goals)").all().map(c => c.name);
+    if (!goalCols.includes('normalized_title')) {
+      this.db.exec('ALTER TABLE goals ADD COLUMN normalized_title TEXT');
+      // Update all existing goals with normalized titles
+      const goals = this.db.prepare('SELECT id, title FROM goals').all();
+      const stmt = this.db.prepare('UPDATE goals SET normalized_title = ? WHERE id = ?');
+      this.db.transaction(() => {
+        for (const g of goals) {
+          stmt.run(normalizeGoalTitle(g.title), g.id);
+        }
+      })();
+    }
+
+    this.cleanupDuplicateGoals();
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_active_goal_title
+      ON goals(normalized_title)
+      WHERE status = 'active';
     `);
   }
 
@@ -587,6 +667,133 @@ class StudyFlowDB {
         AND status  != 'deleted'
       LIMIT 1
     `).get(title, dueDate, goalId) || null;
+  }
+
+  /**
+   * Phase 2A — One-time startup cleanup of legacy duplicate recurring tasks.
+   *
+   * Groups all non-deleted recurring tasks by (title, goal_id, recurrence_pattern).
+   * Within each group, preserves:
+   *   - Every completed task (history must stay intact)
+   *   - Every overdue/today pending task
+   *   - The single nearest future pending task
+   * Soft-deletes everything else (UPDATE status = 'deleted').
+   *
+   * This method is idempotent: running it multiple times is safe because
+   * already-deleted rows are excluded from the query and the nearest future
+   * task is always preserved before any deletions occur.
+   *
+   * @returns {{ deleted: number[], preserved: number[], skippedGroups: number }}
+   */
+  cleanupDuplicateGoals() {
+    try {
+      const duplicates = this.db.prepare(`
+        SELECT normalized_title, COUNT(*) as c
+        FROM goals
+        WHERE status = 'active'
+        GROUP BY normalized_title
+        HAVING c > 1
+      `).all();
+
+      if (!duplicates.length) return;
+
+      const deleteDuplicates = this.db.transaction(() => {
+        let removedCount = 0;
+        for (const dup of duplicates) {
+          const rows = this.db.prepare(`
+            SELECT id FROM goals 
+            WHERE normalized_title = ? AND status = 'active'
+            ORDER BY created_at ASC
+          `).all(dup.normalized_title);
+
+          const oldestId = rows[0].id;
+          const duplicateIds = rows.slice(1).map(r => r.id);
+
+          // Move tasks to oldest, ignoring conflicts to respect idx_task_unique
+          for (const dupId of duplicateIds) {
+            this.db.prepare(`UPDATE OR IGNORE tasks SET goal_id = ? WHERE goal_id = ?`).run(oldestId, dupId);
+            this.db.prepare(`UPDATE tasks SET status = 'deleted' WHERE goal_id = ?`).run(dupId);
+            this.db.prepare(`UPDATE goals SET status = 'deleted', updated_at = datetime('now') WHERE id = ?`).run(dupId);
+            removedCount++;
+          }
+        }
+        return removedCount;
+      });
+      const removed = deleteDuplicates();
+      console.log(`[STARTUP] Cleaned ${removed} duplicate active goals.`);
+    } catch (err) {
+      console.error('[STARTUP] Duplicate goal cleanup failed:', err.message);
+    }
+  }
+
+  cleanupDuplicateRecurringTasks() {
+    const todayStr = new Date().toISOString().slice(0, 10);
+
+    const rows = this.db.prepare(`
+      SELECT id, title, goal_id, recurrence_pattern, due_date, status
+      FROM   tasks
+      WHERE  is_recurring = 1
+        AND  status      != 'deleted'
+      ORDER  BY due_date ASC, id ASC
+    `).all();
+
+    // Build groups keyed by title::goal_id::recurrence_pattern
+    const groups = new Map();
+    for (const row of rows) {
+      const key = `${row.title}::${row.goal_id}::${row.recurrence_pattern}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(row);
+    }
+
+    const toDelete    = [];
+    const toPreserve  = [];
+    let skippedGroups = 0;
+
+    for (const tasks of groups.values()) {
+      // Always preserve completed tasks
+      const completed    = tasks.filter(t => t.status === 'completed');
+      // Preserve overdue + today's pending tasks
+      const todayPending = tasks.filter(t => t.status === 'pending' && t.due_date && t.due_date <= todayStr);
+      // Future pending tasks sorted earliest-first (already sorted by query)
+      const futurePending = tasks.filter(t => t.status === 'pending' && (!t.due_date || t.due_date > todayStr));
+
+      // Collect all preserved ids first, then mark duplicates for deletion
+      const preservedIds = new Set([
+        ...completed.map(t => t.id),
+        ...todayPending.map(t => t.id),
+      ]);
+
+      if (futurePending.length > 0) {
+        // Keep only the nearest future instance
+        preservedIds.add(futurePending[0].id);
+        for (let i = 1; i < futurePending.length; i++) {
+          toDelete.push(futurePending[i].id);
+        }
+      }
+
+      if (preservedIds.size === 0) {
+        // Safety: if somehow nothing qualifies to be preserved, skip the group
+        skippedGroups++;
+        continue;
+      }
+
+      toPreserve.push(...preservedIds);
+    }
+
+    if (toDelete.length === 0) {
+      console.log('[DB] cleanupDuplicateRecurringTasks: no duplicates found, nothing to do.');
+      return { deleted: [], preserved: toPreserve, skippedGroups };
+    }
+
+    // Soft-delete in a single transaction — never hard DELETE
+    const softDelete = this.db.prepare(`UPDATE tasks SET status = 'deleted' WHERE id = ?`);
+    const runCleanup = this.db.transaction((ids) => {
+      for (const id of ids) softDelete.run(id);
+    });
+    runCleanup(toDelete);
+
+    console.log(`[DB] cleanupDuplicateRecurringTasks: soft-deleted ${toDelete.length} duplicate recurring tasks, preserved ${toPreserve.length}.`);
+    return { deleted: toDelete, preserved: toPreserve, skippedGroups };
   }
 
 
@@ -1573,7 +1780,9 @@ class StudyFlowDB {
   }
 
   getPlan(date) {
-    const row = this.db.prepare('SELECT * FROM planner_entries WHERE date=?').get(date);
+    // ORDER BY id DESC: returns the most recently saved schedule for this date.
+    // Handles legacy duplicate rows that existed before the UNIQUE index migration.
+    const row = this.db.prepare('SELECT * FROM planner_entries WHERE date=? ORDER BY id DESC LIMIT 1').get(date);
     if (row) { try { row.schedule = JSON.parse(row.schedule||'[]'); } catch { row.schedule = []; } }
     return row;
   }
@@ -1749,6 +1958,36 @@ class StudyFlowDB {
       productiveCategories:    aiContext.productiveCategories,
       skippedCategories:       aiContext.skippedCategories
     };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // QUICK SESSIONS (SAVED SESSIONS)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  getSavedSessions() {
+    return this.db.prepare('SELECT * FROM saved_sessions ORDER BY created_at DESC').all().map(s => {
+      s.segments = JSON.parse(s.segments || '[]');
+      return s;
+    });
+  }
+
+  addSavedSession(session) {
+    const insert = this.db.prepare(`
+      INSERT INTO saved_sessions (title, session_type, duration_minutes, source_prompt, segments)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    const info = insert.run(
+      session.title,
+      session.session_type,
+      session.duration_minutes,
+      session.source_prompt,
+      JSON.stringify(session.segments)
+    );
+    return info.lastInsertRowid;
+  }
+
+  deleteSavedSession(id) {
+    return this.db.prepare('DELETE FROM saved_sessions WHERE id = ?').run(id);
   }
 
   // ═══════════════════════════════════════════════════════════════════════

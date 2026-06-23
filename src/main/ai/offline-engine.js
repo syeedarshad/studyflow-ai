@@ -113,6 +113,35 @@ class OfflineEngine {
   }
 
   // ═══════════════════════════════════════════════════════════════════════
+  // QUICK SESSION PLANNER
+  // ═══════════════════════════════════════════════════════════════════════
+
+  static generateQuickSession(userPrompt, context = null) {
+    const text = (userPrompt || '').toLowerCase();
+    
+    // Extract time hints
+    let totalMinutes = 60;
+    const hourMatch = text.match(/(\d+(?:\.\d+)?)\s*hour/);
+    const minMatch = text.match(/(\d+)\s*min/);
+    if (hourMatch) totalMinutes = Math.round(parseFloat(hourMatch[1]) * 60);
+    else if (minMatch) totalMinutes = parseInt(minMatch[1], 10);
+
+    const segments = [];
+    if (totalMinutes <= 25) {
+      segments.push({ startMin: 0, endMin: totalMinutes, activity: 'Quick Review & Notes' });
+    } else if (totalMinutes <= 45) {
+      segments.push({ startMin: 0, endMin: 10, activity: 'Review previous concepts' });
+      segments.push({ startMin: 10, endMin: totalMinutes, activity: 'Deep study / Problem solving' });
+    } else {
+      segments.push({ startMin: 0, endMin: 15, activity: 'Review previous notes' });
+      segments.push({ startMin: 15, endMin: totalMinutes - 10, activity: 'Deep study / Practice' });
+      segments.push({ startMin: totalMinutes - 10, endMin: totalMinutes, activity: 'Review mistakes & recap' });
+    }
+
+    return { segments, provider: OfflineEngine.name };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
   // MODULE 2 FALLBACK — AI TIMETABLE GENERATOR
   // ═══════════════════════════════════════════════════════════════════════
 

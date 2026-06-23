@@ -109,6 +109,12 @@ contextBridge.exposeInMainWorld('studyflow', {
   timeblockDelete:  (id)     => ipcRenderer.invoke('timeblock-delete',   id),
   timeblockGenerate:(params) => ipcRenderer.invoke('timeblock-generate', params),
 
+  // ─── Quick Session Planner & Saved Sessions ───────────────────────────
+  quickSessionPreview: (params) => ipcRenderer.invoke('quick-session-preview', params),
+  savedSessionSave:    (data)   => ipcRenderer.invoke('saved-session-save',    data),
+  savedSessionGetAll:  ()       => ipcRenderer.invoke('saved-session-get-all'),
+  savedSessionDelete:  (id)     => ipcRenderer.invoke('saved-session-delete',  id),
+
   // ─── Feature 7 — AI Semester Planner ─────────────────────────────────
   semesterGetAll:      ()       => ipcRenderer.invoke('semester-get-all'),
   semesterDelete:      (id)     => ipcRenderer.invoke('semester-delete',       id),

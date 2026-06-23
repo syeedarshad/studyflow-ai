@@ -74,6 +74,9 @@ const ACTION_MAP = {
   regenerateSchedule:      () => regenerateSchedule(),
   runReplanPrompt:         () => runReplanPrompt(),
   runCoachScheduleGeneration: () => runCoachScheduleGeneration(),
+  runQuickSessionPrompt:   () => runQuickSessionPrompt(),
+  saveQuickSession:        () => saveQuickSession(),
+  startQuickSession:       () => startQuickSession(),
   runHybridPlanPreview:    () => runHybridPlanPreview(),
   regenerateReplan:        (instruction) => regenerateReplan(instruction),
   acceptReplanPlan:        (planId) => acceptReplanPlan(planId),
@@ -115,6 +118,7 @@ const ACTION_MAP = {
   saveEditNote:            (noteId) => saveEditNote(noteId),
   updateWellness:          (field, value) => updateWellness(field, value),
   setTheme:                (theme) => setTheme(theme),
+  setPlannerTimeNow:       () => setPlannerTimeNow(),
 };
 
 function collectActionArgs(el, action) {
@@ -925,7 +929,9 @@ async function acceptPlan(planId) {
     toast(`✨ Plan applied — ${res.createdCount || 0} item(s) added`, 'success');
     closeModal();
     await updateSidebarXP();
-    await navigateTo(App.currentPage === 'coach' ? 'coach' : 'dashboard');
+    if (App.currentPage === 'coach')         await navigateTo('coach');
+    else if (App.currentPage === 'planner') await navigateTo('planner');
+    else                                     await navigateTo('dashboard');
   } catch (err) { toast('Failed to apply the plan.', 'error'); }
 }
 
@@ -1452,16 +1458,32 @@ async function activateFocusMode() {
     ? Math.max(10, Math.min(90, topTask.estimated_minutes)) : 25;
 
   document.body.classList.add('focus-mode-active');
-
   const overlay = document.createElement('div');
   overlay.className = 'focus-mode-overlay';
   overlay.id        = 'focus-mode-overlay';
+  document.body.appendChild(overlay);
+
+  renderFocusModeUI();
+}
+
+function renderFocusModeUI() {
+  const overlay = document.getElementById('focus-mode-overlay');
+  if (!overlay) return;
+
+  const isSegmented = Array.isArray(App.focusModeSegments) && App.focusModeSegments.length > 0;
+  
   overlay.innerHTML = `
     <div class="focus-mode-card">
       <div class="focus-mode-task-label">🎯 AI Focus Mode — Deep Work</div>
-      ${topTask ? `
-        <div class="focus-mode-task-title">${topTask.title}</div>
-        <div class="focus-mode-task-meta">${topTask.category} · ${topTask.priority} priority · ~${topTask.estimated_minutes||30}m planned</div>
+      ${isSegmented ? `
+        <div class="focus-mode-task-title">${App.focusModeTaskTitle}</div>
+        <div class="focus-mode-task-meta">Quick Session · ${App.focusCategory} · ${App.focusModeSelectedMinutes}m planned</div>
+        <div class="focus-mode-current-segment" id="fm-current-segment" style="margin-top:12px;padding:8px;background:var(--surface-2);border-radius:var(--radius-sm);color:var(--accent);font-weight:600;font-size:14px;">
+          Current Step: ${App.focusModeSegments[0].activity}
+        </div>
+      ` : App.focusModeTaskTitle ? `
+        <div class="focus-mode-task-title">${App.focusModeTaskTitle}</div>
+        <div class="focus-mode-task-meta">${App.focusCategory} · ~${App.focusModeSelectedMinutes}m planned</div>
       ` : `
         <div class="focus-mode-task-title">Open Focus Session</div>
         <div class="focus-mode-task-meta">No specific task — pure deep work time</div>
@@ -1472,10 +1494,10 @@ async function activateFocusMode() {
       </div>
       <div class="focus-mode-timer-label" id="fm-timer-label">Select duration and start</div>
       <div style="display:flex;justify-content:center;gap:8px;margin-bottom:20px;flex-wrap:wrap">
-        ${[10,25,45,60].map(m => `
+        ${!isSegmented ? [10,25,45,60].map(m => `
           <button class="btn btn-sm ${m===App.focusModeSelectedMinutes?'btn-primary':'btn-secondary'}"
             id="fm-dur-${m}" data-action="selectFocusModeDuration" data-minutes="${m}">${m}m</button>
-        `).join('')}
+        `).join('') : ''}
       </div>
       <div class="focus-mode-actions">
         <button class="btn btn-primary"   id="fm-btn-start" data-action="startFocusModeSession">▶ Start Deep Work</button>
@@ -1485,7 +1507,6 @@ async function activateFocusMode() {
       <button class="focus-mode-exit-btn" data-action="deactivateFocusMode">✕ Exit Focus Mode</button>
     </div>
   `;
-  document.body.appendChild(overlay);
 }
 
 function selectFocusModeDuration(minutes) {
@@ -1525,7 +1546,18 @@ function startFocusModeSession() {
       disp.classList.toggle('pulse', App.focusSeconds <= 60);
     }
     const lbl = document.getElementById('fm-timer-label');
-    if (lbl) lbl.textContent = `${minutes - Math.floor(App.focusSeconds/60)}m of ${minutes}m complete`;
+    const elapsedMinutes = Math.floor((App.focusTotal - App.focusSeconds) / 60);
+    if (lbl) lbl.textContent = `${elapsedMinutes}m of ${minutes}m complete`;
+
+    if (Array.isArray(App.focusModeSegments)) {
+      const segEl = document.getElementById('fm-current-segment');
+      if (segEl) {
+        const currentSeg = App.focusModeSegments.find(s => elapsedMinutes >= s.startMin && elapsedMinutes < s.endMin) || App.focusModeSegments[App.focusModeSegments.length - 1];
+        if (currentSeg) {
+          segEl.textContent = `Current Step: ${currentSeg.activity} (${currentSeg.endMin - elapsedMinutes}m remaining)`;
+        }
+      }
+    }
   }, 1000);
 
   toast(`🎯 Focus Mode started — ${minutes} minutes, +50% XP bonus active`, 'info');
@@ -1538,6 +1570,7 @@ function deactivateFocusMode() {
   document.body.classList.remove('focus-mode-active');
   const overlay = document.getElementById('focus-mode-overlay');
   if (overlay) overlay.remove();
+  App.focusModeSegments = null;
 }
 
 // Pomodoro
@@ -1629,7 +1662,10 @@ async function renderPlanner(container) {
           </div>
           <div class="form-group" style="margin-bottom:0">
             <label class="form-label">Start Time</label>
-            <input class="form-input" type="time" id="planner-start" value="18:00">
+            <div style="display:flex;gap:8px;">
+              <input class="form-input" type="time" id="planner-start" value="${(() => { const n = new Date(); return String(n.getHours()).padStart(2,'0')+':'+String(n.getMinutes()).padStart(2,'0'); })()}">
+              <button class="btn btn-secondary" data-action="setPlannerTimeNow" style="padding:0 12px;font-size:12px;">Now</button>
+            </div>
           </div>
         </div>
         <div class="form-group">
@@ -1658,10 +1694,25 @@ async function runScheduleGeneration() {
   const btn        = document.getElementById('planner-btn');
   const hours      = parseFloat(document.getElementById('planner-hours')?.value) || 4;
   const energy     = document.getElementById('planner-energy')?.value || 'medium';
-  const startTime  = document.getElementById('planner-start')?.value || '18:00';
+  let startTime    = document.getElementById('planner-start')?.value || '18:00';
   const notes      = document.getElementById('planner-notes')?.value || '';
   const priInput   = document.getElementById('planner-priorities')?.value || '';
   const priorities = priInput.split(',').map(s=>s.trim()).filter(Boolean);
+
+  // ── Validation: Prevent past start times ──
+  const now = new Date();
+  const currentHour = now.getHours();
+  const currentMinute = now.getMinutes();
+  const [startHourStr, startMinuteStr] = startTime.split(':');
+  const startHour = parseInt(startHourStr, 10);
+  const startMinute = parseInt(startMinuteStr, 10);
+
+  if (startHour < currentHour || (startHour === currentHour && startMinute < currentMinute)) {
+    startTime = `${String(currentHour).padStart(2, '0')}:${String(currentMinute).padStart(2, '0')}`;
+    toast('Start time adjusted to current time.', 'info');
+    const input = document.getElementById('planner-start');
+    if (input) input.value = startTime; // Update UI to reflect the fix
+  }
 
   btn.disabled    = true;
   btn.textContent = '⏳ Generating...';
@@ -1696,6 +1747,14 @@ async function regenerateSchedule() {
   closeModal();
   toast('Regenerating schedule...', 'info');
   await runScheduleGeneration();
+}
+
+function setPlannerTimeNow() {
+  const input = document.getElementById('planner-start');
+  if (input) {
+    const now = new Date();
+    input.value = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  }
 }
 
 function renderSchedule(schedule) {
@@ -1761,6 +1820,26 @@ async function renderCoach(container) {
     <div class="recommended-action">
       <div class="ra-icon">🧭</div>
       <div class="ra-text"><strong>Recommended next action:</strong><br>${scores.recommendedAction || 'Keep going!'}</div>
+    </div>
+
+    <!-- ⚡ QUICK SESSION PLANNER (NEW) -->
+    <div class="card ai-shimmer" style="margin-top:24px">
+      <div class="card-title">⚡ Quick Session Planner</div>
+      <div style="font-size:12px;color:var(--text-3);margin-bottom:12px">Tell AI what you want to study and how much time you have.</div>
+      
+      <!-- Session Templates -->
+      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('qs-input').value='30 min DSA'">30 min DSA</button>
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('qs-input').value='45 min React'">45 min React</button>
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('qs-input').value='60 min Python'">60 min Python</button>
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('qs-input').value='90 min NQT'">90 min NQT</button>
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('qs-input').value='120 min Project Work'">120 min Project</button>
+      </div>
+
+      <div style="display:flex;gap:10px">
+        <input class="form-input" id="qs-input" placeholder="e.g. I have 60 minutes for DSA" style="flex:1">
+        <button class="btn btn-primary" id="qs-btn" data-action="runQuickSessionPrompt">✨ Plan Session</button>
+      </div>
     </div>
 
     <!-- ① AI Memory — foundational: what the AI knows about you -->
@@ -2057,6 +2136,109 @@ async function regenerateReplan(instruction) {
   await runReplanPrompt();
 }
 
+async function runQuickSessionPrompt(promptText) {
+  let prompt = promptText;
+  const inputEl = document.getElementById('qs-input');
+  
+  if (!prompt && inputEl) {
+    prompt = inputEl.value.trim();
+  }
+  
+  if (!prompt) { toast('Please describe what you want to study.', 'error'); return; }
+
+  const btn = document.getElementById('qs-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Planning...'; }
+  
+  try {
+    const res = await window.studyflow.quickSessionPreview({ prompt });
+    if (!res.success) { toast(res.error || 'Failed to plan session.', 'error'); return; }
+    
+    // Store temporarily for the modal
+    App.pendingQuickSession = {
+      title: prompt,
+      session_type: inferSessionCategory(prompt),
+      duration_minutes: res.segments.length ? res.segments[res.segments.length - 1].endMin : 60,
+      source_prompt: prompt,
+      segments: res.segments
+    };
+    
+    showQuickSessionApproval(res);
+  } catch (err) {
+    console.error('[QuickSession]', err);
+    toast('Something went wrong.', 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '✨ Plan Session'; }
+  }
+}
+
+function inferSessionCategory(prompt) {
+  const lower = prompt.toLowerCase();
+  for (const cat of CATEGORIES) {
+    if (lower.includes(cat.toLowerCase())) return cat;
+  }
+  if (lower.includes('nqt')) return 'Aptitude';
+  if (lower.includes('dsa')) return 'DSA';
+  return 'General';
+}
+
+function showQuickSessionApproval(res) {
+  const { segments, provider } = res;
+  showModal('⚡ Quick Session Plan', `
+    <div class="ai-thinking" style="margin-bottom:12px">
+      <span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span>
+      <span style="margin-left:4px">Generated ${formatProviderLabel(provider)}</span>
+    </div>
+    
+    <div class="plan-preview-list" style="margin-bottom:16px">
+      ${segments.map(s => `
+        <div class="plan-preview-item">
+          <span class="pp-time">${s.startMin} - ${s.endMin}m</span>
+          <span class="pp-title">${s.activity}</span>
+        </div>
+      `).join('')}
+    </div>
+    
+    <div style="display:flex;gap:10px;justify-content:flex-end">
+      <button class="btn btn-ghost" data-action="runQuickSessionPrompt">🔄 Regenerate</button>
+      <button class="btn btn-ghost" data-action="saveQuickSession">💾 Save to Time Blocks</button>
+      <button class="btn btn-primary" data-action="startQuickSession">▶️ Start Session</button>
+    </div>
+  `);
+}
+
+async function saveQuickSession() {
+  if (!App.pendingQuickSession) return;
+  const res = await window.studyflow.savedSessionSave(App.pendingQuickSession);
+  if (res.success) {
+    toast('Session saved to Time Blocks!', 'success');
+    closeModal();
+    navigateTo('timeblock');
+  } else {
+    toast('Failed to save session.', 'error');
+  }
+}
+
+async function startQuickSession() {
+  if (!App.pendingQuickSession) return;
+  // Use existing Focus Mode infrastructure but track segments
+  const s = App.pendingQuickSession;
+  App.focusModeActive = true;
+  App.focusModeTaskId = null; // No specific task
+  App.focusModeTaskTitle = s.title;
+  App.focusCategory = s.session_type;
+  App.focusModeSelectedMinutes = s.duration_minutes;
+  App.focusModeSegments = s.segments; // New property to track segmented sessions
+
+  closeModal();
+  document.body.classList.add('focus-mode-active');
+  const overlay = document.createElement('div');
+  overlay.className = 'focus-mode-overlay';
+  overlay.id = 'focus-mode-overlay';
+  document.body.appendChild(overlay);
+
+  renderFocusModeUI();
+}
+
 async function runCoachScheduleGeneration() {
   const btn        = document.getElementById('coach-schedule-btn');
   const hours      = parseFloat(document.getElementById('coach-hours')?.value) || 4;
@@ -2193,7 +2375,7 @@ async function generateGoalPlanPreview() {
 }
 
 function showGoalPlanApproval(plan) {
-  const { goal, templates, deadlineDays } = plan.payload;
+  const { goalData, templates, deadlineDays } = plan.payload;
   const dailyTemplates  = templates.filter(t => t.frequency === 'daily');
   const weeklyTemplates = templates.filter(t => t.frequency === 'weekly');
   const totalDailyMins  = dailyTemplates.reduce((s,t)=>s+t.estimated_minutes,0);
@@ -2212,7 +2394,7 @@ function showGoalPlanApproval(plan) {
       <span style="margin-left:4px">Generated ${formatProviderLabel(plan.provider)} — review before adding</span>
     </div>
     <div class="grid-3" style="gap:10px;margin-bottom:14px">
-      <div class="stat-card" style="padding:12px"><div class="stat-label">Goal</div><div class="stat-value" style="font-size:14px;line-height:1.3">${goal.title}</div></div>
+      <div class="stat-card" style="padding:12px"><div class="stat-label">Goal</div><div class="stat-value" style="font-size:14px;line-height:1.3">${goalData.title}</div></div>
       <div class="stat-card accent-2" style="padding:12px"><div class="stat-label">Deadline</div><div class="stat-value" style="font-size:20px">${deadlineDays}d</div></div>
       <div class="stat-card accent-4" style="padding:12px"><div class="stat-label">Daily Time</div><div class="stat-value" style="font-size:20px">${Math.floor(totalDailyMins/60)}h ${totalDailyMins%60}m</div></div>
     </div>
@@ -2228,8 +2410,23 @@ function showGoalPlanApproval(plan) {
 }
 
 async function acceptGoalPlan(planId) {
+  const btn = document.querySelector(`button[data-action="acceptGoalPlan"][data-plan-id="${planId}"]`);
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Saving...'; }
+
   const res = await window.studyflow.goalPlanAccept(planId);
-  if (!res.success) { toast(res.error || 'Failed to create goal plan', 'error'); return; }
+  if (!res.success) { 
+    if (btn) { btn.disabled = false; btn.textContent = '✓ Accept & Build Plan'; }
+    toast(res.error || 'Failed to create goal plan', 'error'); 
+    return; 
+  }
+
+  if (res.isDuplicate) {
+    toast('Goal already exists.', 'info');
+    closeModal();
+    await navigateTo('goals');
+    return;
+  }
+
   toast(`🏔 Goal created — ${res.createdCount} tasks scheduled!`, 'success');
   closeModal();
   await updateSidebarXP();
@@ -2245,7 +2442,7 @@ async function regenerateGoalPlan(planId) {
   let goalTitle = '', deadlineDays = 60, description = '';
   try {
     const plan = await window.studyflow.db('getPendingPlan', planId);
-    if (plan?.data?.payload?.goal) { goalTitle = plan.data.payload.goal.title||''; description = plan.data.payload.goal.description||''; }
+    if (plan?.data?.payload?.goalData) { goalTitle = plan.data.payload.goalData.title||''; description = plan.data.payload.goalData.description||''; }
     if (plan?.data?.payload?.deadlineDays) deadlineDays = plan.data.payload.deadlineDays;
   } catch (err) { /* use defaults */ }
   await window.studyflow.goalPlanReject(planId);
@@ -2639,44 +2836,52 @@ async function openExam(examId) {
 // ═══════════════════════════════════════════════════════════
 async function renderTimeBlocking(container) {
   const today = new Date().toISOString().slice(0, 10);
-  const res   = await window.studyflow.timeblockGetDay(today);
-  const blocks    = res.blocks    || [];
-  const freeSlots = res.freeSlots || [];
+  const [tbRes, ssRes] = await Promise.all([
+    window.studyflow.timeblockGetDay(today),
+    window.studyflow.savedSessionGetAll()
+  ]);
+  
+  const blocks = tbRes.blocks || [];
+  const freeSlots = tbRes.freeSlots || [];
+  const savedSessions = ssRes.sessions || [];
 
   container.innerHTML = `
     <div class="page-header">
       <div>
-        <div class="page-title">Smart Time Blocking</div>
-        <div class="page-subtitle">AI fills your free slots with optimised study blocks</div>
+        <div class="page-title">Time Blocks</div>
+        <div class="page-subtitle">Manage your saved quick sessions and daily schedule</div>
       </div>
-      <button class="btn btn-primary" id="timeblock-btn" data-action="generateTimeBlocks">✨ Auto-Block Today</button>
+    </div>
+
+    <!-- 1. Saved Sessions Library -->
+    <div class="card" style="margin-bottom:24px">
+      <div class="card-title">💾 Saved Sessions</div>
+      <div style="font-size:12px;color:var(--text-3);margin-bottom:12px">Your personalized quick sessions ready to launch.</div>
+      ${savedSessions.length === 0
+        ? `<div style="color:var(--text-3);font-size:13px">No saved sessions yet. Create one in the Coach tab.</div>`
+        : `<div class="grid-2" style="gap:12px">
+            ${savedSessions.map(s => `
+              <div class="stat-card" style="padding:12px;display:flex;justify-content:space-between;align-items:center">
+                <div>
+                  <div style="font-weight:600;font-size:14px">${s.title}</div>
+                  <div style="font-size:11px;color:var(--text-3)">${s.duration_minutes}m • ${s.session_type}</div>
+                </div>
+                <div style="display:flex;gap:6px">
+                  <button class="btn btn-primary btn-sm" onclick="startSavedSession(${s.id})">▶</button>
+                  <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="deleteSavedSession(${s.id})">✕</button>
+                </div>
+              </div>
+            `).join('')}
+           </div>`
+      }
     </div>
 
     <div class="grid-2" style="gap:24px;align-items:start">
-      <div class="card">
-        <div class="card-title">🕐 Free Slots Today</div>
-        ${freeSlots.length === 0
-          ? `<div style="color:var(--text-3);font-size:13px">No free slots detected. Add time blocks manually or check back after scheduling commitments.</div>`
-          : freeSlots.map(s => `
-            <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
-              <span style="font-size:13px;color:var(--text)">${s.startTime} – ${s.endTime}</span>
-              <span style="font-size:12px;color:var(--text-3)">${s.durationMinutes} min free</span>
-            </div>
-          `).join('')}
-        <div class="form-group" style="margin-top:14px">
-          <label class="form-label">Energy Level for Auto-Blocking</label>
-          <select class="form-select" id="timeblock-energy">
-            <option value="high">⚡ High — 60 min blocks</option>
-            <option value="medium" selected>🔆 Medium — 45 min blocks</option>
-            <option value="low">🌙 Low — 25 min blocks</option>
-          </select>
-        </div>
-      </div>
-
+      <!-- 2. Active Session / Today's Schedule -->
       <div class="card">
         <div class="card-title">📅 Today's Time Blocks</div>
         ${blocks.length === 0
-          ? `<div style="color:var(--text-3);font-size:13px">No time blocks yet. Click "Auto-Block Today" to let AI schedule your free slots.</div>`
+          ? `<div style="color:var(--text-3);font-size:13px">No time blocks yet. Auto-block your free slots or use Quick Sessions.</div>`
           : blocks.map(b => `
             <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
               <span style="font-size:11px;font-family:var(--font-mono);color:var(--accent);min-width:100px">${b.start_time}–${b.end_time}</span>
@@ -2685,6 +2890,35 @@ async function renderTimeBlocking(container) {
               <button class="btn btn-ghost btn-sm" data-action="deleteTimeBlock" data-block-id="${b.id}" style="color:var(--danger)">✕</button>
             </div>
           `).join('')}
+      </div>
+
+      <!-- 3. Advanced: Auto-Block Entire Day -->
+      <div class="card">
+        <div class="card-title">✨ Advanced: Auto-Block Entire Day</div>
+        <div style="font-size:12px;color:var(--text-3);margin-bottom:12px">AI fills your remaining free slots today with optimized study blocks.</div>
+        
+        <div style="font-weight:600;font-size:13px;margin-bottom:8px">🕐 Free Slots Available:</div>
+        ${freeSlots.length === 0
+          ? `<div style="color:var(--text-3);font-size:13px;margin-bottom:12px">No free slots detected. Add time blocks manually or check back later.</div>`
+          : `<div style="margin-bottom:12px">
+              ${freeSlots.map(s => `
+                <div style="display:flex;justify-content:space-between;padding:4px 0;">
+                  <span style="font-size:13px;color:var(--text)">${s.startTime} – ${s.endTime}</span>
+                  <span style="font-size:12px;color:var(--text-3)">${s.durationMinutes} min free</span>
+                </div>
+              `).join('')}
+             </div>`
+        }
+        
+        <div class="form-group" style="margin-top:14px">
+          <label class="form-label">Energy Level for Auto-Blocking</label>
+          <select class="form-select" id="timeblock-energy">
+            <option value="high">⚡ High — 60 min blocks</option>
+            <option value="medium" selected>🔆 Medium — 45 min blocks</option>
+            <option value="low">🌙 Low — 25 min blocks</option>
+          </select>
+        </div>
+        <button class="btn btn-primary" style="width:100%" id="timeblock-btn" data-action="generateTimeBlocks">🚀 Auto-Block Free Slots</button>
       </div>
     </div>
   `;
@@ -2706,6 +2940,34 @@ async function generateTimeBlocks() {
 async function deleteTimeBlock(id) {
   await window.studyflow.timeblockDelete(id);
   await navigateTo('timeblock');
+}
+
+async function deleteSavedSession(id) {
+  if (!confirm('Delete this saved session?')) return;
+  await window.studyflow.savedSessionDelete(id);
+  await navigateTo('timeblock');
+}
+
+async function startSavedSession(id) {
+  const res = await window.studyflow.savedSessionGetAll();
+  const session = res.sessions.find(s => s.id === id);
+  if (!session) return;
+  
+  App.focusModeActive = true;
+  App.focusModeTaskId = null; 
+  App.focusModeTaskTitle = session.title;
+  App.focusCategory = session.session_type;
+  App.focusModeSelectedMinutes = session.duration_minutes;
+  App.focusModeSegments = session.segments; 
+
+  document.body.classList.add('focus-mode-active');
+  const overlay = document.createElement('div');
+  overlay.className = 'focus-mode-overlay';
+  overlay.id = 'focus-mode-overlay';
+  document.body.appendChild(overlay);
+
+  renderFocusModeUI();
+  navigateTo('timeblock'); // Ensure state is synced
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -2941,6 +3203,20 @@ async function sendCoachMessage(prefill) {
   const chatEl = document.getElementById('chat-messages');
   if (chatEl) {
     chatEl.innerHTML += renderChatMessage({ role:'user', content: message });
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
+
+  // Detect session intent using the requested regex: /(\d+)\s*(minute|min|minutes|hour|hours)/i
+  const isSessionIntent = /(\d+)\s*(minute|min|minutes|hour|hours)/i.test(message) && /(for|of|session|plan|study|dsa|react|python|java|nqt|aptitude|project|practice)/i.test(message);
+  
+  if (isSessionIntent) {
+    console.log('[QuickSession] Intent detected:', message);
+    if (input) input.value = '';
+    await runQuickSessionPrompt(message);
+    return; // Do NOT send to normal coach chat pipeline
+  }
+
+  if (chatEl) {
     chatEl.innerHTML += `<div id="coach-typing" style="display:flex;justify-content:flex-start"><div style="background:var(--surface-2);border-radius:12px;padding:10px 14px"><div class="ai-thinking"><span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span></div></div></div>`;
     chatEl.scrollTop = chatEl.scrollHeight;
   }

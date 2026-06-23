@@ -1,15 +1,36 @@
 'use strict';
 
+const { normalizeGoalTitle } = require('../utils');
+
 class GoalRepository {
   constructor(db) {
     this.db = db;
   }
 
   addGoal(goal) {
+    goal.title = (goal.title || '').trim();
+    const normalized = normalizeGoalTitle(goal.title);
+
+    // Prevent duplicate active goals
+    const existing = this.db.prepare(`
+      SELECT * FROM goals 
+      WHERE normalized_title = @normalized AND status = 'active'
+    `).get({ normalized });
+
+    if (existing) {
+      return { ...existing, isDuplicate: true };
+    }
+
     const result = this.db.prepare(`
-      INSERT INTO goals (title, description, goal_type, target_date, status, progress_percentage)
-      VALUES (@title, @description, @goal_type, @target_date, 'active', 0)
-    `).run({ title: goal.title, description: goal.description||'', goal_type: goal.goal_type||'custom', target_date: goal.target_date||null });
+      INSERT INTO goals (title, normalized_title, description, goal_type, target_date, status, progress_percentage)
+      VALUES (@title, @normalized, @description, @goal_type, @target_date, 'active', 0)
+    `).run({ 
+      title: goal.title, 
+      normalized,
+      description: goal.description||'', 
+      goal_type: goal.goal_type||'custom', 
+      target_date: goal.target_date||null 
+    });
     return this.getGoal(result.lastInsertRowid);
   }
 

@@ -218,6 +218,20 @@ function setupIPC() {
   // Preview: AI Daily Schedule Generator
   ipcMain.handle('plan-preview-schedule', async (e, params) => {
     try {
+      // ── Validation: Prevent past start times ──
+      if (params.startTime) {
+        const now = new Date();
+        const currentHour = now.getHours();
+        const currentMinute = now.getMinutes();
+        const [startHourStr, startMinuteStr] = params.startTime.split(':');
+        const startHour = parseInt(startHourStr, 10);
+        const startMinute = parseInt(startMinuteStr, 10);
+
+        if (startHour < currentHour || (startHour === currentHour && startMinute < currentMinute)) {
+          params.startTime = `${String(currentHour).padStart(2, '0')}:${String(currentMinute).padStart(2, '0')}`;
+        }
+      }
+
       const context  = db.getAIContextSummary();
       const result   = await aiProvider.generateSchedule({ ...params, context });
       const plan     = db.savePendingPlan('schedule', JSON.stringify(params), result.schedule, result.provider);
@@ -267,6 +281,15 @@ function setupIPC() {
       if (userPrompt.match(/night/i))     startTime = '20:00';
       if (userPrompt.match(/afternoon/i)) startTime = '13:00';
       hours = Math.min(Math.max(hours, 0.5), 16);
+
+      // ── Validation: Prevent past start times ──
+      const [startHourStr, startMinuteStr] = startTime.split(':');
+      const startHour = parseInt(startHourStr, 10);
+      const startMinute = parseInt(startMinuteStr, 10);
+
+      if (startHour < currentHour || (startHour === currentHour && startMinute < currentMinute)) {
+        startTime = currentTime;
+      }
 
       // ── 4. Build priorities from pending tasks (existing work first) ──────
       const priorities = pendingTasks
@@ -590,19 +613,22 @@ function setupIPC() {
       if (!result.templates.length) {
         return { success: false, error: 'AI could not generate a plan. Try rephrasing.' };
       }
-      const targetDate = new Date();
-      targetDate.setDate(targetDate.getDate() + Math.max(1, parseInt(deadlineDays) || 30));
-      const goal = db.addGoal({
+      // ── Fix: do NOT create the goal here. Store raw goal data so it can be
+      // created in goal-plan-accept only after the user confirms. This prevents
+      // ghost goal rows from cancel/regenerate flows.
+      const resolvedDays = Math.max(1, parseInt(deadlineDays) || 30);
+      const targetDate   = new Date();
+      targetDate.setDate(targetDate.getDate() + resolvedDays);
+      const goalData = {
         title:       goalTitle,
         description: description || '',
         goal_type:   'ai_planned',
         target_date: targetDate.toISOString().slice(0, 10)
-      });
+      };
       const plan = db.savePendingPlan('goal_plan', JSON.stringify({ goalTitle, deadlineDays }), {
-        goal_id:     goal.id,
-        goal,
+        goalData,
         templates:   result.templates,
-        deadlineDays: Math.max(1, parseInt(deadlineDays) || 30)
+        deadlineDays: resolvedDays
       }, result.provider);
       return { success: true, plan, provider: result.provider };
     } catch (err) {
@@ -616,7 +642,18 @@ function setupIPC() {
       if (!plan || plan.type !== 'goal_plan') return { success: false, error: 'Goal plan not found' };
       if (plan.status !== 'pending')           return { success: false, error: 'Plan already resolved' };
 
-      const { goal_id, templates, deadlineDays } = plan.payload;
+      const { goalData, templates, deadlineDays } = plan.payload;
+
+      // ── Fix: goal is created here, at accept time, not at preview time.
+      // This prevents ghost goal rows when the user cancels or regenerates.
+      const goal    = db.addGoal(goalData);
+      
+      if (goal.isDuplicate) {
+        return { success: true, isDuplicate: true, goal };
+      }
+
+      const goal_id = goal.id;
+
       const today = new Date();
       let createdCount = 0;
 
@@ -661,7 +698,7 @@ function setupIPC() {
       const plan = db.getPendingPlan(planId);
       if (!plan || plan.type !== 'goal_plan') return { success: false, error: 'Goal plan not found' };
       db.rejectPendingPlan(planId);
-      if (plan.payload?.goal_id) db.deleteGoal(plan.payload.goal_id);
+      // ── Fix: no ghost goal cleanup needed — goals are only created on accept.
       return { success: true };
     } catch (err) {
       return { success: false, error: err.message };
@@ -944,6 +981,46 @@ function setupIPC() {
       });
 
       return { success: true, blocks: db.getTimeBlocksForDate(targetDate), provider: result.provider, savedCount: saved };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // QUICK SESSION PLANNER (SAVED SESSIONS)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  ipcMain.handle('quick-session-preview', async (e, { prompt }) => {
+    try {
+      const context = db.getAIContextSummary();
+      const result = await aiProvider.generateQuickSession({ prompt, context });
+      return { success: true, ...result };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('saved-session-save', (e, session) => {
+    try {
+      const id = db.addSavedSession(session);
+      return { success: true, id };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('saved-session-get-all', () => {
+    try {
+      return { success: true, sessions: db.getSavedSessions() };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('saved-session-delete', (e, id) => {
+    try {
+      db.deleteSavedSession(id);
+      return { success: true };
     } catch (err) {
       return { success: false, error: err.message };
     }

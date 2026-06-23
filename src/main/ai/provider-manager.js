@@ -380,6 +380,55 @@ User's goal description:
   }
 
   // ═══════════════════════════════════════════════════════════════════════
+  // QUICK SESSION PLANNER
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /**
+   * Generates a segmented Quick Session.
+   */
+  async generateQuickSession({ prompt, context = null }) {
+    const contextBlock = ProviderManager.formatContext(context);
+    const systemPrompt = `You are a study-planning assistant for a productivity app called StudyFlow AI.
+The user wants a personalized "Quick Session" based on their available time and study goal.
+
+Create a highly realistic and structured study session broken down into segments. 
+Rules:
+- Read the user's available time and goal (e.g. "45 minutes for React", "90 mins NQT").
+- Study segments MUST be >= 25 minutes.
+- Coding/Problem Solving/Mock Test/Project segments MUST be >= 30 minutes.
+- Revision/Reading segments MUST be >= 15 minutes.
+- Very short segments (0-15 min) are ONLY allowed for: Flashcards, Formula Review, Quick Notes Review, Documentation Reading, Concept Recap.
+- The sum of durations of all segments must equal the exact available time requested.
+
+Respond with ONLY a raw JSON array of segment objects. Each segment must have:
+- "startMin": integer (starting minute)
+- "endMin": integer (ending minute)
+- "activity": short string description of what to do
+
+User prompt: "${prompt}"
+${contextBlock}
+Respond ONLY with the JSON array.`;
+
+    let text, provider;
+    try {
+      ({ text, provider } = await this.callWithFallback(systemPrompt));
+    } catch (err) {
+      return OfflineEngine.generateQuickSession(prompt, context);
+    }
+
+    const cleaned = ProviderManager.cleanJSON(text);
+    let segments;
+    try {
+      segments = JSON.parse(cleaned);
+      if (!Array.isArray(segments)) throw new Error('not an array');
+    } catch (err) {
+      return OfflineEngine.generateQuickSession(prompt, context);
+    }
+
+    return { segments, provider };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
   // MODULE 2 — AI TIMETABLE GENERATOR
   // ═══════════════════════════════════════════════════════════════════════
 
@@ -411,6 +460,14 @@ Constraints:
 - Total available time: ${hours} hours, starting at ${startTime}
 - User's energy level: ${energy}
 - Priority subjects/tasks: ${priorities.length ? priorities.join(', ') : 'no specific priorities — choose sensible study topics'}
+- Study task durations: Low energy = 25 min, Medium = 45 min, High = 60 min
+- Never create "DSA Practice", "Python Coding", "React Coding", "JavaScript Coding", "Project Development", or "Mock Tests" tasks for less than 25 minutes.
+- Handle leftover time chunks accurately:
+  - 0-10 min: Leave unused (do not schedule anything)
+  - 10-15 min: Assign to a Break block (Stretch / Hydrate / Walk)
+  - 15-25 min: Assign to a Revision block (Quick Revision / Flashcards / Notes Review)
+  - >= 25 min (but smaller than study block size): Assign to a Revision block (Revision Session)
+- If remaining free time is smaller than the selected study block size, do not force-create a short study task. Convert it to a recovery or revision block following the rules above.
 - Include short breaks between long study blocks
 - Include exactly one exercise block and one revision block
 - Extra context from user: ${notes || 'none'}
@@ -942,7 +999,14 @@ Rules:
 - Never exceed 90 minutes of consecutive study without a break
 - Add a 10-15 min break after every 60-90 min study block
 - Prioritise high-priority tasks first
-- Low energy = 25-30 min blocks, medium = 45 min, high = 60 min
+- Study task durations: Low energy = 25 min, Medium = 45 min, High = 60 min
+- Never create "DSA Practice", "Python Coding", "React Coding", "JavaScript Coding", "Project Development", or "Mock Tests" tasks for less than 25 minutes.
+- Handle leftover time chunks accurately:
+  - 0-10 min: Leave unused (do not schedule anything)
+  - 10-15 min: Assign to a Break block (Stretch / Hydrate / Walk)
+  - 15-25 min: Assign to a Revision block (Quick Revision / Flashcards / Notes Review)
+  - >= 25 min (but smaller than study block size): Assign to a Revision block (Revision Session)
+- If remaining free time is smaller than the selected study block size, do not force-create a short study task. Convert it to a recovery or revision block following the rules above.
 
 Respond with ONLY the raw JSON array. No markdown, no explanation.`;
 
@@ -1006,6 +1070,20 @@ Respond with ONLY the raw JSON array. No markdown, no explanation.`;
           blocks.push({ start_time: toTime(cur), end_time: toTime(cur + breakDuration), title: 'Break', category: 'Break', block_type: 'break', task_id: null });
           cur += breakDuration;
           consecutiveStudy = 0;
+        }
+      }
+
+
+      const leftover = end - cur;
+      if (leftover > 0) {
+        if (leftover < 10) {
+          // Leave unused
+        } else if (leftover >= 10 && leftover < 15) {
+          blocks.push({ start_time: toTime(cur), end_time: toTime(end), title: 'Stretch / Hydrate / Walk', category: 'Break', block_type: 'break', task_id: null });
+        } else if (leftover >= 15 && leftover < 25) {
+          blocks.push({ start_time: toTime(cur), end_time: toTime(end), title: 'Quick Revision', category: 'Revision', block_type: 'revision', task_id: null });
+        } else if (leftover >= 25) {
+          blocks.push({ start_time: toTime(cur), end_time: toTime(end), title: 'Revision Session', category: 'Revision', block_type: 'revision', task_id: null });
         }
       }
     }
