@@ -231,7 +231,9 @@ function setupIPC() {
   ipcMain.handle('hybrid-plan-preview', async (e, { userPrompt }) => {
     try {
       // ── 1. Gather all live data ──────────────────────────────────────────
+      const now          = new Date();
       const pendingTasks = db.getTodayTasks().filter(t => t.status === 'pending');
+      const overdueTasks = db.getOverdueTasks();
       const goals        = db.getGoals({ status: 'active' }).slice(0, 5);
       const allExams     = db.getAllExamPreps().filter(x => x.status === 'active');
       const roadmaps     = db.getAllCareerRoadmaps();
@@ -239,11 +241,19 @@ function setupIPC() {
       const prefs        = db.getUserPreferences() || {};
       const aiContext    = db.getAIContextSummary();
 
-      // ── 2. Extract hours and startTime from userPrompt (simple NLP) ──────
+      // ── 2. Compute current date and wall-clock time ───────────────────────
+      const currentHour   = now.getHours();
+      const currentMinute = now.getMinutes();
+      const currentTime   = `${String(currentHour).padStart(2,'0')}:${String(currentMinute).padStart(2,'0')}`;
+      const currentDate   = now.toISOString().slice(0, 10);
+      const timezone      = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+      // ── 3. Extract hours and startTime from userPrompt (simple NLP) ──────
+      // Require explicit am/pm so "2 hours" never mis-sets startTime to 02:00
       const hoursMatch = userPrompt.match(/(\d+(?:\.\d+)?)\s*h(?:our|r)?/i);
-      const timeMatch  = userPrompt.match(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/i);
+      const timeMatch  = userPrompt.match(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i);
       let hours     = hoursMatch ? parseFloat(hoursMatch[1]) : 2;
-      let startTime = prefs.preferred_study_time || '18:00';
+      let startTime = currentTime; // default to actual current time, not 18:00
       if (timeMatch) {
         let h = parseInt(timeMatch[1]);
         const m  = timeMatch[2] ? parseInt(timeMatch[2]) : 0;
@@ -252,12 +262,13 @@ function setupIPC() {
         if (ap === 'am' && h === 12) h = 0;
         startTime = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
       }
-      if (userPrompt.match(/evening/i)) startTime = startTime === '18:00' ? '18:00' : startTime;
-      if (userPrompt.match(/morning/i)) startTime = '08:00';
-      if (userPrompt.match(/night/i))   startTime = '20:00';
+      if (userPrompt.match(/evening/i))   startTime = '18:00';
+      if (userPrompt.match(/morning/i))   startTime = '08:00';
+      if (userPrompt.match(/night/i))     startTime = '20:00';
+      if (userPrompt.match(/afternoon/i)) startTime = '13:00';
       hours = Math.min(Math.max(hours, 0.5), 16);
 
-      // ── 3. Build priorities from pending tasks (existing work first) ──────
+      // ── 4. Build priorities from pending tasks (existing work first) ──────
       const priorities = pendingTasks
         .sort((a, b) => {
           const p = { high: 0, medium: 1, low: 2 };
@@ -266,7 +277,7 @@ function setupIPC() {
         .slice(0, 6)
         .map(t => t.title);
 
-      // ── 4. Build enriched notes string (injected via existing notes param) ─
+      // ── 5. Build enriched notes string (injected via existing notes param) ─
       const goalLines = goals.length
         ? goals.map(g => `${g.title} (${g.paceStatus || 'on track'}, ${g.daysRemaining ?? '?'}d left)`).join('; ')
         : 'None';
@@ -284,15 +295,20 @@ function setupIPC() {
         ? (roadmaps[0].milestones || []).find(m => m.status === 'in_progress')?.title || roadmaps[0].title
         : 'None';
 
+      const overdueCount = overdueTasks.length;
       const notes = [
+        `Current date: ${currentDate}, Current time: ${currentTime} (${timezone})`,
         `User request: "${userPrompt}"`,
         `Burnout risk: ${burnout.riskLevel || 'none'} — ${burnout.recommendation || 'no recommendation'}`,
         `Active goals: ${goalLines}`,
         `Upcoming exams: ${examLines}`,
         `Current roadmap milestone: ${currentMilestone}`,
+        overdueCount > 0
+          ? `Overdue tasks: ${overdueCount} (user has ${overdueCount} overdue task${overdueCount > 1 ? 's' : ''} — consider scheduling a recovery block)`
+          : 'No overdue tasks.',
       ].join('\n');
 
-      // ── 5. Call existing generateSchedule() with assembled params ─────────
+      // ── 6. Call existing generateSchedule() with assembled params ─────────
       const result = await aiProvider.generateSchedule({
         hours,
         energy:    prefs.energy_level || 'medium',
@@ -302,7 +318,7 @@ function setupIPC() {
         context:   aiContext,
       });
 
-      // ── 6. Save via existing pending-plan mechanism and return ────────────
+      // ── 7. Save via existing pending-plan mechanism and return ────────────
       const plan = db.savePendingPlan('schedule', userPrompt, result.schedule, result.provider);
       return { success: true, plan, provider: result.provider };
     } catch (err) {
@@ -606,20 +622,28 @@ function setupIPC() {
 
       templates.forEach(tpl => {
         if (tpl.frequency === 'daily') {
-          const span = Math.min(14, deadlineDays);
+          const span = Math.min(3, deadlineDays);
           for (let i = 0; i < span; i++) {
             const due = new Date(today);
             due.setDate(due.getDate() + i);
-            db.addTask({ title: tpl.title, category: tpl.category, priority: tpl.priority, due_date: due.toISOString().slice(0, 10), reminder_time: '', notes: tpl.notes, estimated_minutes: tpl.estimated_minutes, is_recurring: 1, recurrence_pattern: 'daily', goal_id });
-            createdCount++;
+            const dueDate = due.toISOString().slice(0, 10);
+            const existing = db.findTaskByTitleAndDate(tpl.title, dueDate, goal_id);
+            if (!existing) {
+              db.addTask({ title: tpl.title, category: tpl.category, priority: tpl.priority, due_date: dueDate, reminder_time: '', notes: tpl.notes, estimated_minutes: tpl.estimated_minutes, is_recurring: 1, recurrence_pattern: 'daily', goal_id });
+              createdCount++;
+            }
           }
         } else {
-          const weeks = Math.max(1, Math.ceil(deadlineDays / 7));
+          const weeks = Math.min(2, Math.max(1, Math.ceil(deadlineDays / 7)));
           for (let w = 0; w < weeks; w++) {
             const due = new Date(today);
             due.setDate(due.getDate() + (w * 7) + 6);
-            db.addTask({ title: tpl.title, category: tpl.category, priority: tpl.priority, due_date: due.toISOString().slice(0, 10), reminder_time: '', notes: tpl.notes, estimated_minutes: tpl.estimated_minutes, is_recurring: 1, recurrence_pattern: 'weekly', goal_id });
-            createdCount++;
+            const dueDate = due.toISOString().slice(0, 10);
+            const existing = db.findTaskByTitleAndDate(tpl.title, dueDate, goal_id);
+            if (!existing) {
+              db.addTask({ title: tpl.title, category: tpl.category, priority: tpl.priority, due_date: dueDate, reminder_time: '', notes: tpl.notes, estimated_minutes: tpl.estimated_minutes, is_recurring: 1, recurrence_pattern: 'weekly', goal_id });
+              createdCount++;
+            }
           }
         }
       });

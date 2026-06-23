@@ -1,0 +1,262 @@
+{
+  "totals": {
+    "total": 195,
+    "pending": 178,
+    "completed": 16,
+    "deleted": 1,
+    "recurring": 172
+  },
+  "byStatus": [
+    {
+      "status": "pending",
+      "count": 178
+    },
+    {
+      "status": "completed",
+      "count": 16
+    },
+    {
+      "status": "deleted",
+      "count": 1
+    }
+  ],
+  "futureTasksCount": 154,
+  "futureSample": [
+    {
+      "id": 4,
+      "title": "Daily Python & Basic DSA Practice",
+      "due_date": "2026-06-24",
+      "is_recurring": 1,
+      "recurrence_pattern": "daily",
+      "goal_id": 1,
+      "created_at": "2026-06-21 13:51:18"
+    },
+    {
+      "id": 5,
+      "title": "Daily Python & Basic DSA Practice",
+      "due_date": "2026-06-24",
+      "is_recurring": 1,
+      "recurrence_pattern": "daily",
+      "goal_id": 1,
+      "created_at": "2026-06-21 13:51:18"
+    },
+    {
+      "id": 19,
+      "title": "Daily Aptitude & Reasoning Drills",
+      "due_date": "2026-06-24",
+      "is_recurring": 1,
+      "recurrence_pattern": "daily",
+      "goal_id": 1,
+      "created_at": "2026-06-21 13:51:18"
+    },
+    {
+      "id": 33,
+      "title": "Daily Communication Skills Enhancement",
+      "due_date": "2026-06-24",
+      "is_recurring": 1,
+      "recurrence_pattern": "daily",
+      "goal_id": 1,
+      "created_at": "2026-06-21 13:51:18"
+    },
+    {
+      "id": 57,
+      "title": "StudyFlow AI Core Module Development",
+      "due_date": "2026-06-24",
+      "is_recurring": 1,
+      "recurrence_pattern": "daily",
+      "goal_id": 2,
+      "created_at": "2026-06-21 13:52:34"
+    },
+    {
+      "id": 70,
+      "title": "StudyFlow AI UI/AI/Analytics Development",
+      "due_date": "2026-06-24",
+      "is_recurring": 1,
+      "recurrence_pattern": "daily",
+      "goal_id": 2,
+      "created_at": "2026-06-21 13:52:34"
+    },
+    {
+      "id": 71,
+      "title": "StudyFlow AI UI/AI/Analytics Development",
+      "due_date": "2026-06-24",
+      "is_recurring": 1,
+      "recurrence_pattern": "daily",
+      "goal_id": 2,
+      "created_at": "2026-06-21 13:52:34"
+    },
+    {
+      "id": 84,
+      "title": "Daily Feature Testing & Bug Resolution",
+      "due_date": "2026-06-24",
+      "is_recurring": 1,
+      "recurrence_pattern": "daily",
+      "goal_id": 2,
+      "created_at": "2026-06-21 13:52:34"
+    },
+    {
+      "id": 85,
+      "title": "Daily Feature Testing & Bug Resolution",
+      "due_date": "2026-06-24",
+      "is_recurring": 1,
+      "recurrence_pattern": "daily",
+      "goal_id": 2,
+      "created_at": "2026-06-21 13:52:34"
+    },
+    {
+      "id": 99,
+      "title": "Deployment Prep & GitHub Documentation",
+      "due_date": "2026-06-24",
+      "is_recurring": 1,
+      "recurrence_pattern": "daily",
+      "goal_id": 2,
+      "created_at": "2026-06-21 13:52:34"
+    }
+  ],
+  "top20Duplicates": [
+    {
+      "title": "StudyFlow AI UI/AI/Analytics Development",
+      "occurrences": 14,
+      "earliest_due": "2026-06-21",
+      "latest_due": "2026-07-04",
+      "statuses": "pending,completed",
+      "is_recurring": 1
+    },
+    {
+      "title": "StudyFlow AI Core Module Development",
+      "occurrences": 14,
+      "earliest_due": "2026-06-21",
+      "latest_due": "2026-07-04",
+      "statuses": "pending,completed",
+      "is_recurring": 1
+    },
+    {
+      "title": "NQT Programming Logic & DSA Review",
+      "occurrences": 14,
+      "earliest_due": "2026-06-22",
+      "latest_due": "2026-07-05",
+      "statuses": "completed,pending",
+      "is_recurring": 1
+    },
+    {
+      "title": "Deployment Prep & GitHub Documentation",
+      "occurrences": 14,
+      "earliest_due": "2026-06-21",
+      "latest_due": "2026-07-04",
+      "statuses": "pending,completed,deleted",
+      "is_recurring": 1
+    },
+    {
+      "title": "Daily Python & Basic DSA Practice",
+      "occurrences": 14,
+      "earliest_due": "2026-06-21",
+      "latest_due": "2026-07-04",
+      "statuses": "pending,completed",
+      "is_recurring": 1
+    },
+    {
+      "title": "Daily NQT Aptitude Practice",
+      "occurrences": 14,
+      "earliest_due": "2026-06-22",
+      "latest_due": "2026-07-05",
+      "statuses": "completed,pending",
+      "is_recurring": 1
+    },
+    {
+      "title": "Daily Feature Testing & Bug Resolution",
+      "occurrences": 14,
+      "earliest_due": "2026-06-21",
+      "latest_due": "2026-07-04",
+      "statuses": "pending,completed",
+      "is_recurring": 1
+    },
+    {
+      "title": "Daily Communication Skills Enhancement",
+      "occurrences": 14,
+      "earliest_due": "2026-06-21",
+      "latest_due": "2026-07-04",
+      "statuses": "pending,completed",
+      "is_recurring": 1
+    },
+    {
+      "title": "Daily Aptitude & Reasoning Drills",
+      "occurrences": 14,
+      "earliest_due": "2026-06-21",
+      "latest_due": "2026-07-04",
+      "statuses": "pending,completed",
+      "is_recurring": 1
+    },
+    {
+      "title": "Weekly Project Review & Planning",
+      "occurrences": 9,
+      "earliest_due": "2026-06-27",
+      "latest_due": "2026-08-22",
+      "statuses": "pending",
+      "is_recurring": 1
+    },
+    {
+      "title": "Weekly NQT Mock Test & Analysis",
+      "occurrences": 9,
+      "earliest_due": "2026-06-28",
+      "latest_due": "2026-08-23",
+      "statuses": "pending",
+      "is_recurring": 1
+    },
+    {
+      "title": "Weekly NQT Coding Challenge",
+      "occurrences": 9,
+      "earliest_due": "2026-06-28",
+      "latest_due": "2026-08-23",
+      "statuses": "pending",
+      "is_recurring": 1
+    },
+    {
+      "title": "NQT Verbal Ability & Communication Practice",
+      "occurrences": 9,
+      "earliest_due": "2026-06-28",
+      "latest_due": "2026-08-23",
+      "statuses": "pending",
+      "is_recurring": 1
+    },
+    {
+      "title": "Weekly TCS NQT Mock Test & Analysis",
+      "occurrences": 5,
+      "earliest_due": "2026-06-27",
+      "latest_due": "2026-07-25",
+      "statuses": "pending",
+      "is_recurring": 1
+    },
+    {
+      "title": "Weekly Revision & Challenging Problem Solving",
+      "occurrences": 5,
+      "earliest_due": "2026-06-27",
+      "latest_due": "2026-07-25",
+      "statuses": "pending",
+      "is_recurring": 1
+    }
+  ],
+  "recurrencePatterns": [
+    {
+      "recurrence_pattern": "daily",
+      "count": 126
+    },
+    {
+      "recurrence_pattern": "weekly",
+      "count": 46
+    }
+  ],
+  "goalLinkedTasks": [
+    {
+      "goal_id": 2,
+      "task_count": 65
+    },
+    {
+      "goal_id": 3,
+      "task_count": 55
+    },
+    {
+      "goal_id": 1,
+      "task_count": 52
+    }
+  ]
+}

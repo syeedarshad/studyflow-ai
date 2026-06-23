@@ -74,6 +74,7 @@ const ACTION_MAP = {
   regenerateSchedule:      () => regenerateSchedule(),
   runReplanPrompt:         () => runReplanPrompt(),
   runCoachScheduleGeneration: () => runCoachScheduleGeneration(),
+  runHybridPlanPreview:    () => runHybridPlanPreview(),
   regenerateReplan:        (instruction) => regenerateReplan(instruction),
   acceptReplanPlan:        (planId) => acceptReplanPlan(planId),
   showGoalCreateModal:     () => showGoalCreateModal(),
@@ -318,20 +319,62 @@ function formatProviderLabel(provider) {
 // ─── Greeting helpers ──────────────────────────────────────────────────────────────
 
 /**
- * getGreetingHeader — returns a SHORT, single-line greeting with emoji + name.
- * Never exceeds one line. Never includes coaching or context.
+ * getGreetingHeader — returns a SHORT, single-line, time-aware greeting.
+ * Rotates randomly within each time window on every dashboard refresh.
+ * Never includes coaching, task counts, goal progress, or burnout info.
+ *
+ * Time windows:
+ *   05:00–09:59  Early morning   — fixed warm welcome
+ *   10:00–11:59  Mid-morning     — rotate 3 options
+ *   12:00–15:59  Afternoon       — rotate 3 options
+ *   16:00–19:59  Evening         — rotate 3 options
+ *   20:00–23:59  Night           — rotate 3 options
+ *   00:00–04:59  Late night      — rotate 3 options
  *
  * @param {string} name - display name
- * @returns {string}  e.g. "🌅 Good Morning, Arshad"
+ * @returns {string}  e.g. "☀️ Hope your day's going well, Arshad"
  */
 function getGreetingHeader(name = 'Student') {
-  const h = new Date().getHours();
-  if (h < 5)  return `🌙 Good Night, ${name}`;
+  const h    = new Date().getHours();
+  const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+
+  // 00:00–04:59  Late night
+  if (h < 5) return pick([
+    `🌙 Still working, ${name}?`,
+    `😴 Don't forget to get some rest.`,
+    `🦉 Night owl mode activated.`,
+  ]);
+
+  // 05:00–09:59  Early morning — single fixed greeting
   if (h < 10) return `🌅 Good Morning, ${name}`;
-  if (h < 12) return `☀️ Good Morning, ${name}`;
-  if (h < 16) return `🌞 Good Afternoon, ${name}`;
-  if (h < 20) return `🌆 Good Evening, ${name}`;
-  return `🌚 Good Night, ${name}`;
+
+  // 10:00–11:59  Mid-morning
+  if (h < 12) return pick([
+    `☀️ Hope your day's going well, ${name}`,
+    `☕ Ready for another productive session, ${name}?`,
+    `🚀 Let's keep the momentum going, ${name}`,
+  ]);
+
+  // 12:00–15:59  Afternoon
+  if (h < 16) return pick([
+    `🌞 Good Afternoon, ${name}`,
+    `💪 Keep pushing forward, ${name}`,
+    `📚 Making progress today, ${name}?`,
+  ]);
+
+  // 16:00–19:59  Evening
+  if (h < 20) return pick([
+    `🌆 Good Evening, ${name}`,
+    `✨ How's your progress today, ${name}?`,
+    `🎯 Time for one more productive session, ${name}`,
+  ]);
+
+  // 20:00–23:59  Night
+  return pick([
+    `🌙 Good Night, ${name}`,
+    `🎯 One more focused session before you wrap up?`,
+    `📖 Finishing strong today, ${name}?`,
+  ]);
 }
 
 /**
@@ -359,10 +402,10 @@ function getGreetingHeader(name = 'Student') {
 function getCoachingLine({ burnoutRisk = 'none', exams = [], pendingCount = 0, goals = [], streak = 0, todayXP = 0 } = {}) {
   // 1. Burnout — wellness always takes priority
   if (burnoutRisk === 'high') {
-    return `Your wellbeing matters most. Keep tonight's session short and get some rest.`;
+    return `Consider a lighter workload today and make time to rest.`;
   }
   if (burnoutRisk === 'moderate') {
-    return `Take it steady today. Short, focused sessions work better than pushing through.`;
+    return `Consider a lighter workload today.`;
   }
 
   // 2. Upcoming exam ≤ 7 days
@@ -377,16 +420,16 @@ function getCoachingLine({ burnoutRisk = 'none', exams = [], pendingCount = 0, g
       .filter(x => x.daysLeft <= 7)
       .sort((a, b) => a.daysLeft - b.daysLeft)[0];
     if (soonest) {
-      if (soonest.daysLeft === 0) return `Your ${soonest.exam_name} exam is TODAY — you've got this!`;
-      if (soonest.daysLeft === 1) return `Your ${soonest.exam_name} exam is tomorrow. Focus on what matters most.`;
-      return `Your ${soonest.exam_name} exam is in ${soonest.daysLeft} days. Let's make today count.`;
+      if (soonest.daysLeft === 0) return `Your ${soonest.exam_name} exam is today.`;
+      if (soonest.daysLeft === 1) return `Your ${soonest.exam_name} exam is tomorrow.`;
+      return `Your ${soonest.exam_name} exam is ${soonest.daysLeft} days away.`;
     }
   }
 
   // 3. Pending tasks
   if (pendingCount > 0) {
-    if (pendingCount === 1) return `You have 1 task remaining today — finish strong.`;
-    return `You have ${pendingCount} tasks remaining today. Let's get through them.`;
+    if (pendingCount === 1) return `You have 1 task remaining today.`;
+    return `You have ${pendingCount} tasks remaining today.`;
   }
 
   // 4. Goal progress (≥ 10% threshold — low values are not motivating)
@@ -395,18 +438,18 @@ function getCoachingLine({ burnoutRisk = 'none', exams = [], pendingCount = 0, g
       .filter(g => typeof g.progress_percentage === 'number' && g.progress_percentage >= 10)
       .sort((a, b) => b.progress_percentage - a.progress_percentage)[0];
     if (topGoal) {
-      return `Your "${topGoal.title}" goal is ${Math.round(topGoal.progress_percentage)}% complete — keep the momentum going.`;
+      return `You're making steady progress on ${topGoal.title}.`;
     }
   }
 
   // 5. Streak celebration
   if (streak >= 3) {
-    return `${streak}-day streak 🔥 — great consistency. Keep it going!`;
+    return `You're on a ${streak}-day streak — keep it going!`;
   }
 
   // 6. XP earned
   if (todayXP > 0) {
-    return `You've earned ${todayXP} XP today — nice work!`;
+    return `You've earned ${todayXP} XP today.`;
   }
 
   // 7. No data — return empty; template will suppress the coaching row
@@ -1088,6 +1131,8 @@ async function deleteTask(id) {
 // ═══════════════════════════════════════════════════════════
 // PAGE: TASKS
 // ═══════════════════════════════════════════════════════════
+let _cachedAllTasks = [];
+
 async function renderTasks(container) {
   const [allRes, todayRes] = await Promise.all([
     window.studyflow.db('getTasks', {}),
@@ -1099,6 +1144,8 @@ async function renderTasks(container) {
   const pending    = todayTasks.filter(t => t.status === 'pending');
   const completed  = todayTasks.filter(t => t.status === 'completed');
   const overdue    = allTasks.filter(t => t.status === 'pending' && t.due_date && new Date(t.due_date) < new Date(new Date().setHours(0,0,0,0)));
+
+  _cachedAllTasks = allTasks.filter(t => t.status !== 'deleted');
 
   container.innerHTML = `
     <div class="page-header">
@@ -1132,7 +1179,7 @@ async function renderTasks(container) {
         `).join('')}
       </div>
       <div id="all-tasks-list">
-        ${allTasks.filter(t => t.status !== 'deleted').map(t => renderTaskItem(t)).join('')}
+        ${_cachedAllTasks.map(t => renderTaskItem(t)).join('')}
       </div>
     </div>
   `;
@@ -1143,8 +1190,17 @@ function filterTasks(filter) {
     const btn = document.getElementById(`filter-${f}`);
     if (btn) { btn.className = `btn btn-sm ${f===filter?'btn-primary':'btn-ghost'}`; }
   });
-  // Re-render all-tasks-list based on filter (simplified — re-navigates)
-  navigateTo('tasks');
+  
+  const listEl = document.getElementById('all-tasks-list');
+  if (!listEl) return;
+  
+  const filtered = filter === 'all' 
+    ? _cachedAllTasks 
+    : _cachedAllTasks.filter(t => t.status === filter);
+    
+  listEl.innerHTML = filtered.length > 0
+    ? filtered.map(t => renderTaskItem(t)).join('')
+    : `<div style="font-size:13px;color:var(--text-3);padding:8px 0;">No ${filter} tasks found.</div>`;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1644,14 +1700,30 @@ async function regenerateSchedule() {
 
 function renderSchedule(schedule) {
   const typeColors = { study:'var(--accent)', break:'var(--success)', exercise:'var(--info)', revision:'#a78bfa', warmup:'var(--text-3)', meal:'#f59e0b' };
+  // helpers to compute end time from start HH:MM + duration minutes
+  const toMins = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+  const toHHMM = m => `${String(Math.floor(m / 60) % 24).padStart(2,'0')}:${String(m % 60).padStart(2,'0')}`;
+  const fmtAMPM = t => {
+    const [h, m] = t.split(':').map(Number);
+    const ampm = h < 12 ? 'AM' : 'PM';
+    const h12  = h % 12 || 12;
+    return `${h12}:${String(m).padStart(2,'0')} ${ampm}`;
+  };
   return `<div style="display:flex;flex-direction:column;gap:6px">` +
-    (schedule || []).map(b => `
-      <div class="plan-preview-item">
-        <span class="pp-time">${b.time}</span>
-        <span class="pp-title">${b.activity}</span>
-        <span class="pp-meta" style="color:${typeColors[b.type]||'var(--text-3)'}">${b.duration}m</span>
-      </div>
-    `).join('') +
+    (schedule || []).map(b => {
+      const validTime = /^\d{1,2}:\d{2}$/.test(b.time || '');
+      const endHHMM   = validTime ? toHHMM(toMins(b.time) + (b.duration || 0)) : '';
+      const timeRange = validTime && endHHMM
+        ? `${fmtAMPM(b.time)}\u2013${fmtAMPM(endHHMM)}`
+        : (b.time || '');
+      return `
+        <div class="plan-preview-item">
+          <span class="pp-time" style="font-variant-numeric:tabular-nums;min-width:140px">${timeRange}</span>
+          <span class="pp-title">${b.activity}</span>
+          <span class="pp-meta" style="color:${typeColors[b.type]||'var(--text-3)'};white-space:nowrap">${b.duration}m · ${b.type || 'study'}</span>
+        </div>
+      `;
+    }).join('') +
   `</div>`;
 }
 
@@ -1668,6 +1740,7 @@ async function renderCoach(container) {
 
   const scores   = scoresRes.scores   || { dailyScore:0, weeklyScore:0, focusScore:0, consistencyScore:0, recommendedAction:'Keep going!' };
   const insights = insightsRes.insights || { sampleSize:0, bestFocusHours:[], mostProductiveCategories:[], commonlySkippedCategories:[], insightSentences:[] };
+  const memory   = memoryRes.memory   || {};
   const prefs    = prefsRes.preferences || {};
 
   container.innerHTML = `
@@ -1690,8 +1763,54 @@ async function renderCoach(container) {
       <div class="ra-text"><strong>Recommended next action:</strong><br>${scores.recommendedAction || 'Keep going!'}</div>
     </div>
 
+    <!-- ① AI Memory — foundational: what the AI knows about you -->
+    <div class="card" style="margin-top:24px">
+      <div class="card-title">💾 AI Memory</div>
+      <div style="font-size:12px;color:var(--text-3);margin-bottom:12px">What StudyFlow AI has learned about you. Injected into every AI prompt automatically.</div>
+      ${renderMemoryCards(memory)}
+    </div>
+
+    <!-- ② Learned Preferences — derived from activity patterns -->
+    <div class="card" style="margin-top:24px">
+      <div class="card-title">🎯 Learned Preferences</div>
+      <div style="font-size:12px;color:var(--text-3);margin-bottom:12px">Auto-updated from your activity. Used to personalize AI plans.</div>
+      <div class="grid-2" style="gap:10px">
+        <div class="stat-card" style="padding:12px"><div class="stat-label">Preferred Study Time</div><div class="stat-value" style="font-size:18px">${prefs.preferred_study_time||'—'}</div></div>
+        <div class="stat-card accent-2" style="padding:12px"><div class="stat-label">Most Productive</div><div class="stat-value" style="font-size:18px">${prefs.most_productive_category||'—'}</div></div>
+        <div class="stat-card accent-4" style="padding:12px"><div class="stat-label">Avg Focus Length</div><div class="stat-value" style="font-size:18px">${prefs.focus_duration?prefs.focus_duration+'m':'—'}</div></div>
+        <div class="stat-card accent-3" style="padding:12px"><div class="stat-label">Energy Level</div><div class="stat-value" style="font-size:18px">${prefs.energy_level||'—'}</div></div>
+      </div>
+    </div>
+
+    <!-- ③ Habit Learning Engine — pattern insights -->
+    <div class="card" style="margin-top:24px">
+      <div class="card-title">🧠 Habit Learning Engine</div>
+      ${insights.sampleSize === 0
+        ? `<div style="color:var(--text-3);font-size:13px">${insights.message || 'Not enough data yet.'}</div>`
+        : `
+          <div style="font-size:12px;color:var(--text-3);margin-bottom:10px">Based on ${insights.sampleSize} activity logs from the last 30 days:</div>
+          ${insights.insightSentences?.length ? `
+            <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px">
+              ${insights.insightSentences.map((s,i) => `
+                <div style="display:flex;align-items:center;gap:10px;background:var(--surface-2);border-radius:var(--radius-sm);padding:10px 14px;animation:planItemIn 0.4s ease backwards;animation-delay:${i*0.06}s">
+                  <span style="color:var(--accent)">💡</span>
+                  <span style="font-size:13px;color:var(--text)">${s}</span>
+                </div>
+              `).join('')}
+            </div>
+          ` : ''}
+          <div class="insight-tags">
+            ${insights.bestFocusHours.map(h=>`<span class="insight-tag good">⏰ Focus hour: ${h}:00</span>`).join('')}
+            ${insights.mostProductiveCategories.map(c=>`<span class="insight-tag good">✅ Strong in: ${c}</span>`).join('')}
+            ${insights.commonlySkippedCategories.map(c=>`<span class="insight-tag warn">⚠️ Often skipped: ${c}</span>`).join('')}
+          </div>
+        `}
+    </div>
+
+    <!-- ④ Weekly Review (async slot) -->
     <div id="weekly-review-slot" style="margin-top:24px"></div>
 
+    <!-- ⑤ Adaptive Replanning + ⑥ AI Schedule Generator -->
     <div class="grid-2" style="margin-top:24px;gap:24px;align-items:start">
       <div class="card ai-shimmer">
         <div class="card-title">🔄 Adaptive Replanning</div>
@@ -1735,52 +1854,68 @@ async function renderCoach(container) {
         <button class="btn btn-primary" id="coach-schedule-btn" style="width:100%" data-action="runCoachScheduleGeneration">✨ Generate Schedule</button>
       </div>
     </div>
-
-    <div class="card" style="margin-top:24px">
-      <div class="card-title">🧠 Habit Learning Engine</div>
-      ${insights.sampleSize === 0
-        ? `<div style="color:var(--text-3);font-size:13px">${insights.message || 'Not enough data yet.'}</div>`
-        : `
-          <div style="font-size:12px;color:var(--text-3);margin-bottom:10px">Based on ${insights.sampleSize} activity logs from the last 30 days:</div>
-          ${insights.insightSentences?.length ? `
-            <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px">
-              ${insights.insightSentences.map((s,i) => `
-                <div style="display:flex;align-items:center;gap:10px;background:var(--surface-2);border-radius:var(--radius-sm);padding:10px 14px;animation:planItemIn 0.4s ease backwards;animation-delay:${i*0.06}s">
-                  <span style="color:var(--accent)">💡</span>
-                  <span style="font-size:13px;color:var(--text)">${s}</span>
-                </div>
-              `).join('')}
-            </div>
-          ` : ''}
-          <div class="insight-tags">
-            ${insights.bestFocusHours.map(h=>`<span class="insight-tag good">⏰ Focus hour: ${h}:00</span>`).join('')}
-            ${insights.mostProductiveCategories.map(c=>`<span class="insight-tag good">✅ Strong in: ${c}</span>`).join('')}
-            ${insights.commonlySkippedCategories.map(c=>`<span class="insight-tag warn">⚠️ Often skipped: ${c}</span>`).join('')}
-          </div>
-        `}
-    </div>
-
-    <div class="card" style="margin-top:24px">
-      <div class="card-title">🎯 Learned Preferences</div>
-      <div style="font-size:12px;color:var(--text-3);margin-bottom:12px">Auto-updated from your activity. Used to personalize AI plans.</div>
-      <div class="grid-2" style="gap:10px">
-        <div class="stat-card" style="padding:12px"><div class="stat-label">Preferred Study Time</div><div class="stat-value" style="font-size:18px">${prefs.preferred_study_time||'—'}</div></div>
-        <div class="stat-card accent-2" style="padding:12px"><div class="stat-label">Most Productive</div><div class="stat-value" style="font-size:18px">${prefs.most_productive_category||'—'}</div></div>
-        <div class="stat-card accent-4" style="padding:12px"><div class="stat-label">Avg Focus Length</div><div class="stat-value" style="font-size:18px">${prefs.focus_duration?prefs.focus_duration+'m':'—'}</div></div>
-        <div class="stat-card accent-3" style="padding:12px"><div class="stat-label">Energy Level</div><div class="stat-value" style="font-size:18px">${prefs.energy_level||'—'}</div></div>
-      </div>
-    </div>
-
-    <div class="card" style="margin-top:24px">
-      <div class="card-title">💾 AI Memory</div>
-      <div style="font-size:12px;color:var(--text-3);margin-bottom:10px">What StudyFlow AI has learned about you. Used in every AI prompt.</div>
-      ${Object.keys(memoryRes.memory||{}).length===0
-        ? `<div style="color:var(--text-3);font-size:13px">No learned preferences yet.</div>`
-        : `<pre style="font-size:11px;color:var(--text-2);background:var(--surface-2);border-radius:var(--radius-sm);padding:12px;overflow-x:auto;font-family:var(--font-mono)">${JSON.stringify(memoryRes.memory,null,2)}</pre>`}
-    </div>
   `;
 
   loadWeeklyReview();
+}
+
+/**
+ * Renders AI Memory data as human-readable cards instead of raw JSON.
+ * Known keys are formatted with labels and bullet lists.
+ * Unknown custom keys are shown as simple cards so no data is lost.
+ */
+function renderMemoryCards(memory) {
+  if (!memory || Object.keys(memory).length === 0) {
+    return `<div style="color:var(--text-3);font-size:13px">No learned preferences yet. Use StudyFlow AI for a few days to unlock this.</div>`;
+  }
+
+  const fmtHour = h => h === 0 ? '12 AM' : h < 12 ? `${h} AM` : h === 12 ? '12 PM' : `${h - 12} PM`;
+  const knownKeys = ['habit_best_focus_hours','habit_productive_categories','habit_skipped_categories','preferred_study_hours','energy_pattern'];
+  const cards = [];
+
+  if (Array.isArray(memory.habit_best_focus_hours) && memory.habit_best_focus_hours.length) {
+    cards.push({ icon:'⏰', title:'Best Focus Hours',    items: memory.habit_best_focus_hours.map(fmtHour), color:'var(--accent)' });
+  }
+  if (Array.isArray(memory.habit_productive_categories) && memory.habit_productive_categories.length) {
+    cards.push({ icon:'✅', title:'Strong Categories',   items: memory.habit_productive_categories, color:'var(--success)' });
+  }
+  if (Array.isArray(memory.habit_skipped_categories) && memory.habit_skipped_categories.length) {
+    cards.push({ icon:'⚠️', title:'Frequently Skipped', items: memory.habit_skipped_categories, color:'var(--warning)' });
+  }
+  if (memory.preferred_study_hours) {
+    cards.push({ icon:'🕐', title:'Preferred Study Hours', items:[String(memory.preferred_study_hours)], color:'var(--info)' });
+  }
+  if (memory.energy_pattern && typeof memory.energy_pattern === 'object') {
+    const entries = Object.entries(memory.energy_pattern).map(([k,v]) => `${k}: ${v}`);
+    if (entries.length) cards.push({ icon:'⚡', title:'Energy Pattern', items: entries, color:'var(--accent)' });
+  }
+  // Unknown / custom keys — shown as plain cards so nothing is silently hidden
+  Object.entries(memory).forEach(([key, val]) => {
+    if (knownKeys.includes(key)) return;
+    const label   = key.replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase());
+    const display = Array.isArray(val) ? val.map(String) : [typeof val === 'object' ? JSON.stringify(val) : String(val)];
+    cards.push({ icon:'💡', title: label, items: display, color:'var(--text-3)' });
+  });
+
+  if (cards.length === 0) {
+    return `<div style="color:var(--text-3);font-size:13px">No learned preferences yet.</div>`;
+  }
+
+  return `
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px">
+      ${cards.map((c,i) => `
+        <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px;animation:planItemIn 0.4s ease backwards;animation-delay:${i * 0.07}s">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+            <span style="font-size:16px">${c.icon}</span>
+            <span style="font-size:12px;font-weight:700;color:${c.color}">${c.title}</span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px">
+            ${c.items.map(item => `<span style="font-size:12px;color:var(--text-2)">• ${item}</span>`).join('')}
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
 }
 
 function renderScoreCard(label, value, icon) {
@@ -2746,7 +2881,7 @@ async function renderCoachChat(container) {
             <div>Hi! I'm your AI study coach. Ask me anything:</div>
             <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
               ${["I'm tired today", "I have an exam tomorrow", "I missed my tasks", "How am I doing?", "What should I focus on?"].map(q => `
-                <button class="btn btn-ghost btn-sm" data-action="sendCoachMessage" data-message="%24%7Bq%7D" style="font-size:12px">${q}</button>
+                <button class="btn btn-ghost btn-sm" data-action="sendCoachMessage" data-message="${encodeURIComponent(q)}" style="font-size:12px">${q}</button>
               `).join('')}
             </div>
           </div>
@@ -2768,10 +2903,29 @@ async function renderCoachChat(container) {
 
 function renderChatMessage(msg) {
   const isUser = msg.role === 'user';
+  let displayContent = msg.content;
+  
+  if (!isUser) {
+    if (typeof displayContent === 'string') {
+      try {
+        const parsed = JSON.parse(displayContent);
+        if (parsed && typeof parsed === 'object') {
+          console.debug('Coach Chat JSON response:', parsed);
+          displayContent = parsed.message || displayContent;
+        }
+      } catch (e) {
+        // Not JSON, leave as string
+      }
+    } else if (typeof displayContent === 'object' && displayContent !== null) {
+      console.debug('Coach Chat Object response:', displayContent);
+      displayContent = displayContent.message || 'No message provided';
+    }
+  }
+
   return `
     <div style="display:flex;${isUser?'justify-content:flex-end':'justify-content:flex-start'}">
       <div style="max-width:75%;background:${isUser?'var(--accent)':'var(--surface-2)'};color:${isUser?'#000':'var(--text)'};border-radius:${isUser?'12px 12px 2px 12px':'12px 12px 12px 2px'};padding:10px 14px;font-size:13px;line-height:1.5">
-        ${msg.content}
+        ${displayContent}
       </div>
     </div>
   `;

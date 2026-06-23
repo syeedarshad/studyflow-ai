@@ -205,6 +205,12 @@ class StudyFlowDB {
     if (!taskCols.includes('goal_id')) {
       this.db.exec('ALTER TABLE tasks ADD COLUMN goal_id INTEGER REFERENCES goals(id)');
     }
+    if (!taskCols.includes('created_at')) {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN created_at TEXT DEFAULT (datetime('now'))");
+    }
+    if (!taskCols.includes('completed_at')) {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN completed_at TEXT");
+    }
 
     // user_preferences
     this.db.exec(`
@@ -509,7 +515,7 @@ class StudyFlowDB {
     if (filter.category) { sql += ' AND category = ?';          params.push(filter.category); }
     if (filter.date)     { sql += ' AND date(due_date) = ?';    params.push(filter.date); }
     if (filter.goal_id)  { sql += ' AND goal_id = ?';           params.push(filter.goal_id); }
-    sql += ' ORDER BY CASE priority WHEN "high" THEN 1 WHEN "medium" THEN 2 ELSE 3 END, created_at ASC';
+    sql += " ORDER BY CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, created_at ASC";
     return this.db.prepare(sql).all(...params);
   }
 
@@ -565,6 +571,24 @@ class StudyFlowDB {
     `);
     return stmt.run({ ...normalized, xp_reward: xp });
   }
+
+  /**
+   * Deduplication check: returns an existing task row if one already exists
+   * with the same title, due_date, and goal_id (and is not deleted).
+   * Used by the goal-plan-accept handler to prevent re-inserting tasks
+   * when a plan is accepted more than once.
+   */
+  findTaskByTitleAndDate(title, dueDate, goalId) {
+    return this.db.prepare(`
+      SELECT id FROM tasks
+      WHERE title    = ?
+        AND due_date = ?
+        AND goal_id  = ?
+        AND status  != 'deleted'
+      LIMIT 1
+    `).get(title, dueDate, goalId) || null;
+  }
+
 
   updateTask(id, updates) {
     const allowed = ['title', 'category', 'priority', 'status', 'due_date',
