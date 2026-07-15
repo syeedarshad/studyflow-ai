@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:;">
+  <title>StudyFlow AI</title>
+  <link rel="stylesheet" href="styles/main.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js" defer></script>
+</head>
+<body>
+
+<div class="app-shell">
+
+  <!-- ─── SIDEBAR ─────────────────────────────────────────── -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <div class="app-logo" id="sidebar-toggle" title="Collapse sidebar" data-action="toggleSidebar">⚡</div>
+      <span class="app-name">StudyFlow AI</span>
+    </div>
+
+    <nav class="sidebar-nav">
+
+      <a class="nav-item active" data-page="dashboard">
+        <span class="nav-icon">⊞</span>
+        <span class="nav-label">Dashboard</span>
+      </a>
+
+      <a class="nav-item" data-page="tasks">
+        <span class="nav-icon">✓</span>
+        <span class="nav-label">Tasks</span>
+      </a>
+
+      <a class="nav-item" data-page="focus">
+        <span class="nav-icon">◎</span>
+        <span class="nav-label">Focus</span>
+      </a>
+
+      <a class="nav-item" data-page="planner">
+        <span class="nav-icon">◈</span>
+        <span class="nav-label">Planner</span>
+      </a>
+
+      <a class="nav-item" data-page="coach">
+        <span class="nav-icon">✺</span>
+        <span class="nav-label">Coach</span>
+      </a>
+
+      <a class="nav-item" data-page="goals">
+        <span class="nav-icon">🏔</span>
+        <span class="nav-label">Goals</span>
+      </a>
+
+      <a class="nav-item" data-page="roadmap">
+        <span class="nav-icon">🗺️</span>
+        <span class="nav-label">Roadmap</span>
+      </a>
+
+      <a class="nav-item" data-page="exam">
+        <span class="nav-icon">📝</span>
+        <span class="nav-label">Exam Prep</span>
+      </a>
+
+      <a class="nav-item" data-page="timeblock">
+        <span class="nav-icon">🕐</span>
+        <span class="nav-label">Time Blocks</span>
+      </a>
+
+      <a class="nav-item" data-page="semester">
+        <span class="nav-icon">🎓</span>
+        <span class="nav-label">Semester</span>
+      </a>
+
+      <a class="nav-item" data-page="chat">
+        <span class="nav-icon">💬</span>
+        <span class="nav-label">Coach Chat</span>
+      </a>
+
+      <a class="nav-item" data-page="analytics">
+        <span class="nav-icon">▦</span>
+        <span class="nav-label">Analytics</span>
+      </a>
+
+      <a class="nav-item" data-page="notes">
+        <span class="nav-icon">📝</span>
+        <span class="nav-label">Notes</span>
+      </a>
+
+      <a class="nav-item" data-page="wellness">
+        <span class="nav-icon">💧</span>
+        <span class="nav-label">Wellness</span>
+      </a>
+
+      <a class="nav-item" data-page="achievements">
+        <span class="nav-icon">🏆</span>
+        <span class="nav-label">Achievements</span>
+      </a>
+
+      <a class="nav-item" data-page="settings">
+        <span class="nav-icon">⚙</span>
+        <span class="nav-label">Settings</span>
+      </a>
+
+    </nav>
+
+    <!-- Title Badge + XP Profile -->
+    <div class="sidebar-profile">
+      <div class="sidebar-avatar-row" id="profile-dropdown-trigger" data-action="toggleProfileDropdown" title="Profile menu">
+        <div class="sidebar-avatar" id="sidebar-avatar">A</div>
+        <div class="sidebar-avatar-name" id="sidebar-avatar-name">Student</div>
+      </div>
+      <div class="profile-dropdown" id="profile-dropdown">
+        <button class="profile-dropdown-item" data-action="navigateTo" data-page="profile">👤 My Profile</button>
+        <button class="profile-dropdown-item" data-action="navigateTo" data-page="settings">⚙️ Account Settings</button>
+        <button class="profile-dropdown-item" data-action="navigateTo" data-page="settings">🧠 Memory</button>
+        <button class="profile-dropdown-item" data-action="navigateTo" data-page="settings">📚 Study Preferences</button>
+        <button class="profile-dropdown-item" data-action="navigateTo" data-page="planner">🗓️ Planner</button>
+        <button class="profile-dropdown-item" data-action="navigateTo" data-page="settings">🎨 Theme</button>
+        <button class="profile-dropdown-item" disabled title="Not built yet — no notification preferences exist beyond the OS-level task alerts already in the app">🔔 Notifications <span class="profile-dropdown-badge">Soon</span></button>
+        <button class="profile-dropdown-item" disabled title="Cloud sync isn't available yet — StudyFlow AI is local-only for now">☁️ Sync <span class="profile-dropdown-badge">Soon</span></button>
+        <button class="profile-dropdown-item" data-action="showHelp">❓ Help</button>
+        <div class="profile-dropdown-divider"></div>
+        <button class="profile-dropdown-item profile-dropdown-danger" data-action="logout">🚪 Sign Out</button>
+      </div>
+      <div class="title-badge-row" id="title-badge-row" style="display:none">
+        <span class="title-badge-icon">🏅</span>
+        <span class="title-badge-text" id="title-badge-text">Beginner</span>
+      </div>
+      <div class="profile-xp">
+        <div class="xp-badge">
+          <span id="side-level">Lv 1</span>
+        </div>
+        <div class="xp-info">
+          <div class="xp-bar-wrap">
+            <div class="xp-bar-fill" id="side-xp-bar" style="width:0%"></div>
+          </div>
+          <span class="xp-text" id="side-xp-text">0 XP</span>
+        </div>
+      </div>
+    </div>
+
+  </aside>
+
+  <!-- ─── MAIN CONTENT ─────────────────────────────────────── -->
+  <main class="main-content" id="main-content">
+    <!-- Rendered by app.js navigateTo() -->
+  </main>
+
+</div>
+
+<!-- ─── MODAL ────────────────────────────────────────────────── -->
+<div class="modal-overlay" id="modal-overlay">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title" id="modal-title">Modal</div>
+      <button class="modal-close" id="modal-close">✕</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<!-- ─── TOAST CONTAINER ──────────────────────────────────────── -->
+<div id="toast-container"></div>
+
+<script src="app.js"></script>
+<script src="onboarding-coach.js"></script>
+</body>
+</html>

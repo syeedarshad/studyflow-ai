@@ -37,6 +37,7 @@ echo  Installing dependencies...
 echo  (This may take 2-5 minutes on first run)
 echo.
 
+cd frontend
 npm install
 
 if %errorlevel% neq 0 (
@@ -59,5 +60,4 @@ echo  To BUILD exe:       npm run build
 echo.
 echo  Starting StudyFlow AI now...
 echo.
-
 npm start

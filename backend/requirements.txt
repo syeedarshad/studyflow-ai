@@ -1,0 +1,55 @@
+# StudyFlow AI — FastAPI Backend Requirements
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ─── Core Framework ───────────────────────────────────────────────────────────
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+
+# ─── Database ─────────────────────────────────────────────────────────────────
+sqlalchemy==2.0.36
+alembic==1.14.0
+asyncpg==0.30.0           # async PostgreSQL driver
+psycopg2-binary==2.9.10   # sync driver (used by Alembic)
+greenlet==3.1.1           # required for SQLAlchemy asyncio
+
+# ─── Data Validation ──────────────────────────────────────────────────────────
+pydantic==2.10.3
+pydantic-settings==2.6.1
+email-validator==2.2.0
+
+# ─── Security ─────────────────────────────────────────────────────────────────
+passlib[bcrypt]==1.7.4 
+bcrypt==4.0.1    # password hashing
+cryptography==43.0.3       # API key encryption (Fernet)
+python-multipart==0.0.12   # form data / file uploads
+
+# ─── Session Tokens ───────────────────────────────────────────────────────────
+# No JWT — we use cryptographically random session tokens stored server-side.
+  # stdlib, no install needed (listed for documentation)
+
+# ─── Email (OTP / Forgot Password) ────────────────────────────────────────────
+fastapi-mail==1.4.1
+
+# ─── HTTP Client (for AI provider calls) ──────────────────────────────────────
+httpx==0.28.1
+
+# ─── WebSockets ───────────────────────────────────────────────────────────────
+websockets==14.1
+
+# ─── File Storage ─────────────────────────────────────────────────────────────
+# python-magic-bin provides a pre-built Windows binary (avoids OpenSSL build issues).
+# On Linux/macOS use python-magic instead.
+python-magic-bin==0.4.14; sys_platform == "win32"
+python-magic==0.4.27;     sys_platform != "win32"
+aiofiles==24.1.0           # async file I/O
+
+# ─── Rate Limiting ────────────────────────────────────────────────────────────
+slowapi==0.1.9
+
+# ─── CORS & Middleware ────────────────────────────────────────────────────────
+# fastapi already includes starlette
+
+# ─── Testing ──────────────────────────────────────────────────────────────────
+pytest==8.3.4
+pytest-asyncio==0.24.0
+httpx                      # already listed above, also used for TestClient

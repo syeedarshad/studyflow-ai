@@ -1,170 +1,61 @@
-# ⚡ StudyFlow AI
-### Smart Productivity Dashboard for College Students
+# StudyFlow AI
 
-A complete desktop productivity application built with Electron.js, featuring task management, focus timer, analytics, gamification, and more.
+StudyFlow AI is a professional full-stack product that provides a smart productivity dashboard tailored for students. It currently includes an Electron Desktop Application and is transitioning toward a full-scale architecture featuring a FastAPI backend, PostgreSQL database, AI Agents, Realtime Chat, and more.
 
----
+## Project Overview
 
-## 🚀 Quick Start
+StudyFlow AI helps you track goals, tasks, study sessions, and wellness with the power of artificial intelligence. It adapts to your study habits, generates personalized plans, and provides actionable insights.
 
-### Prerequisites
-- **Node.js** v18 or higher — https://nodejs.org
-- **npm** (comes with Node.js)
-- **Windows 10/11** (for .exe build)
+## Architecture
 
----
+The project is structured as a scalable monorepo separating frontend, backend, and shared logic:
+- **Frontend**: An Electron Desktop Application running Vite (future) and Vanilla JS / React (future).
+- **Backend**: A FastAPI Python application handling heavy AI orchestration, PostgreSQL database interactions, and realtime features.
+- **Shared**: Common TypeScript/Python schemas, API contracts, and utilities used by both frontend and backend.
 
-## 📦 Installation
-
-### Step 1 — Clone / Extract the project
-```
-studyflow-ai/
-```
-
-### Step 2 — Install dependencies
-Open a terminal inside the `studyflow-ai` folder and run:
-```bash
-npm install
-```
-
-> Note: `better-sqlite3` is a native module. If it fails to install, run:
-> ```bash
-> npm install --build-from-source
-> ```
-> Or install `windows-build-tools` first:
-> ```bash
-> npm install --global windows-build-tools
-> ```
-
-### Step 3 — Run the app
-```bash
-npm start
-```
-
----
-
-## 🏗 Build Windows Executable
-
-### Build installer (.exe with NSIS)
-```bash
-npm run build
-```
-
-This creates:
-- `dist/StudyFlow AI Setup 1.0.0.exe` — Installable Windows setup
-- `dist/StudyFlow AI 1.0.0.exe` — Portable executable
-
-### Build directory (no installer)
-```bash
-npm run build:dir
-```
-
----
-
-## 📁 Project Structure
+## Folder Structure
 
 ```
-studyflow-ai/
-├── src/
-│   ├── main/
-│   │   ├── main.js          ← Electron main process
-│   │   ├── preload.js       ← Secure IPC bridge
-│   │   └── database.js      ← SQLite database layer
-│   └── renderer/
-│       ├── index.html       ← Main app window
-│       ├── widget.html      ← Floating widget window
-│       ├── app.js           ← All page logic & UI
-│       └── styles/
-│           └── main.css     ← Complete stylesheet + themes
-├── assets/
-│   └── icons/               ← App icons
-├── package.json
-└── README.md
+StudyFlow-AI/
+├── frontend/       # Electron application, Vite config, renderer, UI assets
+├── backend/        # FastAPI application, database models, migrations
+├── shared/         # Reusable constants, types, schemas, and API contracts
+├── docs/           # Project documentation
+├── scripts/        # Utility scripts (launch, install)
+└── assets/         # Root-level assets
 ```
 
----
+## Setup & Installation
 
-## 🗄 Database
+### Frontend Setup
+1. Run `install.bat` from the root directory, or navigate to `frontend/` and run `npm install`.
+2. The `package.json` inside the `frontend/` folder manages all desktop dependencies.
 
-SQLite database is stored at:
-```
-%APPDATA%\studyflow-ai\studyflow.db
-```
+### Backend Setup (Upcoming)
+1. Navigate to the `backend/` directory.
+2. Create a virtual environment: `python -m venv .venv`
+3. Activate the virtual environment and install dependencies: `pip install -r requirements.txt`.
 
-### Schema Overview
-| Table | Purpose |
-|-------|---------|
-| `tasks` | All tasks with category, priority, XP |
-| `sessions` | Focus/study sessions |
-| `xp_log` | XP history |
-| `streaks` | Daily streak tracking |
-| `notes` | Quick notes |
-| `wellness` | Daily health tracking |
-| `achievements` | Earned badges |
-| `settings` | App configuration |
-| `planner_entries` | Daily plans |
+## Running Development
 
----
+### Building and Running Electron
+- **Launch Development Server**: Run `launch.bat` in the root, or `npm start` from within the `frontend/` directory.
+- **Build Executable**: Navigate to `frontend/` and run `npm run build` to package the application with electron-builder.
 
-## ✨ Features
+### Running FastAPI (Upcoming)
+- Start the server using uvicorn: `uvicorn app.main:app --reload` from the `backend/` directory.
 
-| Feature | Description |
-|---------|-------------|
-| 🎯 Task Management | Add, edit, complete tasks across 9 categories |
-| ⚡ XP & Levels | Earn XP for tasks, level up, earn badges |
-| 🔥 Streaks | Daily study streak counter |
-| ⏱ Focus Timer | Pomodoro, countdown, stopwatch |
-| 📊 Analytics | Chart.js charts for all study data |
-| 📅 Planner | AI-generated daily schedule |
-| 📝 Notes | Pinnable rich notes with search |
-| 💧 Wellness | Water, exercise, sleep tracking |
-| 🏆 Achievements | 8 achievement badges |
-| 🎨 Themes | Dark, Light, Blue, Cyberpunk, Minimal |
-| 🔔 Notifications | Desktop notifications with reminders |
-| ◈ Widget | Always-on-top floating widget |
-| ⚙️ System Tray | Runs in tray after window close |
+### Docker (Upcoming)
+- Use `docker-compose up` inside the `backend/` folder to spin up the FastAPI backend and PostgreSQL database simultaneously.
 
----
+## Environment Variables
+- **Frontend**: Store environment variables in `frontend/.env`. Refer to `frontend/.env.example` for required keys.
+- **Backend**: Store environment variables in `backend/.env`. Database credentials and API keys go here.
 
-## 🎨 Themes
-
-- **Dark** — Deep space indigo (default)
-- **Light** — Clean professional white
-- **Blue** — Ocean deep blue
-- **Cyberpunk** — Electric cyan + pink
-- **Minimal** — Clean monochrome
-
----
-
-## 🔧 Troubleshooting
-
-**App won't start:**
-- Make sure Node.js v18+ is installed
-- Run `npm install` again
-- Try `npm start` from inside the project folder
-
-**Database errors:**
-- The DB auto-creates on first launch
-- Delete `%APPDATA%\studyflow-ai\studyflow.db` to reset
-
-**Build fails:**
-- Install Visual Studio Build Tools for native modules
-- Or use `npm install --build-from-source`
-
-**Widget not visible:**
-- Click the ◈ button in the titlebar to toggle the widget
-
----
-
-## 📈 Roadmap Ideas
-
-- Cloud sync with Firebase
-- AI-generated study plans via API
-- Pomodoro sound effects
-- Calendar integration
-- Export analytics to PDF
-- Mobile companion app
-
----
-
-Built with ❤️ using Electron.js, SQLite, Chart.js
+## Future Roadmap
+- ✅ Electron Desktop Application
+- 🚧 FastAPI Backend & PostgreSQL
+- ⏳ AI Coach & Memory
+- ⏳ AI Agents & Friends System
+- ⏳ WebSocket Realtime Chat
+- ⏳ Mobile App & Web Dashboard
