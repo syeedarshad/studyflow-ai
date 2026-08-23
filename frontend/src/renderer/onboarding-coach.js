@@ -48,8 +48,12 @@ const OnboardingCoach = (() => {
 
   async function maybeStart() {
     try {
+      if (window.OnboardingAPI) {
+        const statusRes = await window.OnboardingAPI.getStatus();
+        if (statusRes?.success && statusRes?.data?.completed) return; // already done or skipped on backend
+      }
       const res = await window.studyflow.memoryGetAll();
-      if (res?.data?.onboarding_profile_complete) return; // already done, or explicitly skipped
+      if (res?.data?.onboarding_profile_complete) return; // local fallback
     } catch (err) {
       return;
     }
@@ -257,7 +261,7 @@ const OnboardingCoach = (() => {
     const reader = new FileReader();
     reader.onload = () => {
       const base64Data = String(reader.result).split(',')[1];
-      state.attachment = { mimeType: file.type, base64Data, fileName: file.name };
+      state.attachment = { mimeType: file.type, base64Data, fileName: file.name, rawFile: file };
       renderAttachmentChip();
       enterChatMode();
       if (pendingUploadContext) {
@@ -534,6 +538,18 @@ const OnboardingCoach = (() => {
     if (attachment) showAnalyzing(attachment.fileName); else showTyping();
 
     try {
+      // 1. Submit to authenticated backend Onboarding & RAG pipeline
+      if (window.OnboardingAPI) {
+        if (text) {
+          window.OnboardingAPI.submitMessage(text).catch(e => console.warn('[Onboarding] Backend message index notice:', e));
+        }
+        if (attachment?.rawFile) {
+          const sType = (uploadContext === 'timetable' ? 'timetable' : (uploadContext === 'study plan' ? 'study_plan' : (uploadContext === 'resume' ? 'resume' : 'notes')));
+          window.OnboardingAPI.uploadFile(attachment.rawFile, sType).catch(e => console.warn('[Onboarding] Backend document index notice:', e));
+        }
+      }
+
+      // 2. Chat extraction for conversational UI
       const res = await window.studyflow.onboardingChat({
         userMessage: text,
         attachment,
@@ -668,6 +684,11 @@ const OnboardingCoach = (() => {
       </div>
     `);
 
+    // Synchronize completion with authenticated backend state
+    if (window.OnboardingAPI) {
+      window.OnboardingAPI.complete().catch(e => console.warn('[Onboarding] Complete notice:', e));
+    }
+
     const a = state.knownFields;
     await Promise.all(Object.keys(a).map(key => window.studyflow.memorySet(key, a[key])));
     await window.studyflow.memorySet('onboarding_profile_complete', true);
@@ -733,6 +754,9 @@ const OnboardingCoach = (() => {
   }
 
   function handleSkip() {
+    if (window.OnboardingAPI) {
+      window.OnboardingAPI.skip().catch(e => console.warn('[Onboarding] Skip notice:', e));
+    }
     window.studyflow.memorySet('onboarding_profile_complete', '__skipped__');
     unmount();
   }

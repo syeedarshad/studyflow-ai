@@ -47,3 +47,22 @@ frontend/test/.tmp-test-userdata/
 *.db-shm
 *.db-wal
 *.bak
+
+# Test coverage
+backend/.coverage
+.coverage
+htmlcov/
+
+# Backend runtime data / user uploads / RAG vector storage
+backend/uploads/
+
+# Python caches
+*.pyc
+__pycache__/
+
+# Environment secrets
+backend/.env
+
+# Temporary files
+*.tmp
+*.temp

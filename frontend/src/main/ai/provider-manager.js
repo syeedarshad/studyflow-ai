@@ -58,17 +58,38 @@ class ProviderManager {
   }
 
   // ═══════════════════════════════════════════════════════════════════════
-  // KEY MANAGEMENT
+  // KEY MANAGEMENT — REMOVED (Phase 4)
   // ═══════════════════════════════════════════════════════════════════════
+  //
+  // API keys are now managed exclusively by the backend via environment
+  // variables (GEMINI_API_KEY / GROQ_API_KEY).  The Electron process
+  // NEVER holds, reads, or forwards provider credentials.
+  //
+  // getKeys() is kept as a no-op stub so any unconverted callers fail
+  // gracefully rather than crashing.
 
   getKeys() {
+    // Credentials removed — return empty object; all AI calls go through backend
+    return { gemini: '', groq: '' };
+  }
+
+  /**
+   * Reads the FastAPI session token from electron-store (backend-session).
+   * Returns the decrypted plaintext token, or '' if not available.
+   * The token is used to authenticate backend API calls — it is NEVER
+   * logged, included in error messages, or sent anywhere except the
+   * Authorization header of backend requests.
+   */
+  _getBackendSessionToken() {
     try {
-      return {
-        gemini: this.db.getSetting('gemini_api_key') || '',
-        groq:   this.db.getSetting('groq_api_key')   || ''
-      };
+      const Store = require('electron-store');
+      const { decrypt } = require('../secure-store');
+      const tokenStore = new Store({ name: 'backend-session' });
+      const encrypted = tokenStore.get('token');
+      if (!encrypted) return '';
+      return decrypt(encrypted) || '';
     } catch {
-      return { gemini: '', groq: '' };
+      return '';
     }
   }
 
@@ -146,54 +167,97 @@ class ProviderManager {
   }
 
   // ═══════════════════════════════════════════════════════════════════════
-  // CORE FALLBACK CHAIN — Gemini → Groq
+  // CORE FALLBACK CHAIN — Routes through backend (Phase 4)
   // ═══════════════════════════════════════════════════════════════════════
 
   /**
-   * Tries Gemini first, then Groq. Throws if both fail, which causes
-   * each generate* method's outer try/catch to invoke OfflineEngine.
+   * Sends the prompt to the FastAPI backend (POST /api/v1/ai/generate).
+   *
+   * The backend owns the Gemini → Groq fallback chain and all provider keys.
+   * This method ONLY handles:
+   *   - Reading the session token (for the Authorization header)
+   *   - HTTP transport to the backend
+   *   - Returning { text, provider } in the same shape as before
+   *
+   * All prompt-building logic in the methods above is unchanged.
+   * If the backend is unreachable (app is offline), throws so the caller
+   * can invoke OfflineEngine as before.
+   *
+   * @param {string} prompt  - fully-built prompt string
+   * @param {string} [feature] - optional feature label for usage tracking
+   * @returns {{ text: string, provider: string }}
    */
-  async callWithFallback(prompt) {
-    const keys = this.getKeys();
-    const errors = [];
+  async callWithFallback(prompt, feature) {
+    const token = this._getBackendSessionToken();
 
-    // 1. Try Gemini (primary)
-    if (keys.gemini) {
-      console.log('TRYING GEMINI');
-      try {
-        const text = await callGemini(keys.gemini, prompt);
-        return { text, provider: 'gemini' };
-      } catch (err) {
-        console.log('GEMINI FAILED:', err);
-        logger.aiError('gemini', 'callWithFallback', err);
-        errors.push(`Gemini: ${err.message}`);
-      }
-    } else {
-      const noKeyErr = new Error('no API key configured');
-      console.log('GEMINI FAILED:', noKeyErr);
-      errors.push('Gemini: no API key configured');
+    if (!token) {
+      // No backend session — fall through to OfflineEngine
+      logger.warn('[provider-manager] No backend session token — falling back to offline engine.');
+      throw new Error('No backend session available');
     }
 
-    // 2. Try Groq (fallback)
-    if (keys.groq) {
-      console.log('TRYING GROQ');
-      try {
-        const text = await callGroq(keys.groq, prompt);
-        return { text, provider: 'groq' };
-      } catch (err) {
-        console.log('GROQ FAILED:', err);
-        logger.aiError('groq', 'callWithFallback', err);
-        errors.push(`Groq: ${err.message}`);
-      }
-    } else {
-      const noKeyErr = new Error('no API key configured');
-      console.log('GROQ FAILED:', noKeyErr);
-      errors.push('Groq: no API key configured');
+    const https = require('https');
+    const BACKEND_HOST = '127.0.0.1';
+    const BACKEND_PORT = 8000;
+
+    const bodyStr = JSON.stringify({
+      prompt,
+      feature:     feature || null,
+      expect_json: true,
+    });
+
+    const responseText = await new Promise((resolve, reject) => {
+      const options = {
+        hostname: BACKEND_HOST,
+        port:     BACKEND_PORT,
+        path:     '/api/v1/ai/generate',
+        method:   'POST',
+        headers: {
+          'Content-Type':   'application/json',
+          'Content-Length': Buffer.byteLength(bodyStr),
+          'Authorization':  `Bearer ${token}`,
+        },
+        timeout: 60000,
+      };
+
+      const req = https.request(options, (res) => {
+        let data = '';
+        res.on('data', chunk => (data += chunk));
+        res.on('end', () => {
+          if (res.statusCode === 429) {
+            return reject(new Error('QUOTA_EXCEEDED'));
+          }
+          if (res.statusCode === 401) {
+            return reject(new Error('SESSION_INVALID'));
+          }
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            return reject(new Error(`Backend returned HTTP ${res.statusCode}`));
+          }
+          resolve(data);
+        });
+      });
+
+      req.on('error', (err) => reject(new Error(`Backend unreachable: ${err.code || err.message}`)));
+      req.on('timeout', () => req.destroy(new Error('Backend request timed out')));
+      req.write(bodyStr);
+      req.end();
+    });
+
+    let parsed;
+    try {
+      parsed = JSON.parse(responseText);
+    } catch {
+      throw new Error('Backend returned non-JSON response');
     }
 
-    console.log('ALL PROVIDERS FAILED');
-    logger.warn('All AI providers failed, falling back to offline engine.');
-    throw new Error(`All AI providers failed:\n${errors.join('\n')}`);
+    if (!parsed.success) {
+      // Backend failed (both providers down) — fall back to OfflineEngine
+      const safeErr = parsed.error || 'AI service temporarily unavailable';
+      logger.warn(`[provider-manager] Backend AI failed: ${safeErr}`);
+      throw new Error(safeErr);
+    }
+
+    return { text: parsed.text, provider: parsed.provider || 'gemini' };
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -1384,28 +1448,19 @@ Respond with ONLY raw JSON, no markdown:
     const fullPrompt = `${systemPrompt}${historyText}\n\nUser: ${userMessage || '(see attached document)'}`;
 
     if (attachment) {
-      if (!keys.gemini) {
-        return {
-          reply: "I can't read images, PDFs, or documents without a Gemini API key set up in Settings — could you just tell me in words instead?",
-          extracted: {}, readyForSummary: false, provider: 'offline'
-        };
-      }
+      // Direct attachment reading requires multimodal server support; fallback gracefully if offline
       try {
-        const text = await callGemini(keys.gemini, fullPrompt, attachment, true);
-        const data = JSON.parse(ProviderManager.cleanJSON(text));
+        const text = await this.callWithFallback(fullPrompt);
+        const data = JSON.parse(ProviderManager.cleanJSON(text.text));
         if (!data.reply) throw new Error('no reply field in response');
         return {
           reply: data.reply,
           extracted: data.extracted || {},
           readyForSummary: !!data.readyForSummary,
-          provider: 'gemini'
+          provider: text.provider || 'gemini'
         };
       } catch (err) {
-        logger.aiError('gemini', 'onboardingChat(attachment)', err);
-        return {
-          reply: "I had trouble reading that attachment — could you describe it in a sentence or two instead?",
-          extracted: {}, readyForSummary: false, provider: 'offline'
-        };
+        return this._offlineOnboardingReply(userMessage, knownFields);
       }
     }
 
@@ -1449,49 +1504,14 @@ Respond with ONLY raw JSON, no markdown:
   }
 
   /**
-   * testKey — directly tests ONE provider's key in isolation, bypassing
-   * the normal Gemini→Groq→offline fallback chain entirely (the whole
-   * point is to find out if THIS specific key works, not get a response
-   * from whichever provider happens to succeed).
-   * Returns { success, message } — message is always safe to show the
-   * user as-is (no raw stack traces, but specific enough to act on).
+   * testKey — Deprecated in Phase 4.
+   * Provider credentials are now managed server-side.
    */
   async testKey(provider, keyOverride = null) {
-    const keys = this.getKeys();
-    const key = keyOverride || (provider === 'gemini' ? keys.gemini : keys.groq);
-
-    if (!key) {
-      return { success: false, message: `No ${provider === 'gemini' ? 'Gemini' : 'Groq'} API key saved yet.` };
-    }
-
-    const testPrompt = 'Reply with only the word OK, nothing else.';
-
-    try {
-      const text = provider === 'gemini'
-        ? await callGemini(key, testPrompt, null, false)
-        : await callGroq(key, testPrompt);
-
-      if (!text || !text.trim()) {
-        return { success: false, message: 'The key was accepted, but the response was empty — try again.' };
-      }
-      return { success: true, message: `Key is working (${provider === 'gemini' ? 'Gemini' : 'Groq'} responded successfully).` };
-    } catch (err) {
-      logger.aiError(provider, 'testKey', err);
-      const msg = err.message || 'Unknown error';
-      if (/401|UNAUTHENTICATED|invalid.*api.*key|invalid_api_key/i.test(msg)) {
-        return { success: false, message: 'Key was rejected (invalid or revoked) — generate a new one and check for extra spaces when pasting.' };
-      }
-      if (/403|PERMISSION_DENIED/i.test(msg)) {
-        return { success: false, message: 'Key was rejected (permission denied) — check the API is enabled for this key\'s project.' };
-      }
-      if (/429|RESOURCE_EXHAUSTED|rate.?limit/i.test(msg)) {
-        return { success: false, message: 'Key is valid, but rate-limited right now — try again in a moment.' };
-      }
-      if (/timeout|ETIMEDOUT|ENOTFOUND|ECONNREFUSED/i.test(msg)) {
-        return { success: false, message: 'Could not reach the server — check your internet connection.' };
-      }
-      return { success: false, message: `Request failed: ${msg.slice(0, 150)}` };
-    }
+    return {
+      success: false,
+      message: 'API keys are managed server-side by StudyFlow AI. Individual key testing is no longer required.'
+    };
   }
 }
 

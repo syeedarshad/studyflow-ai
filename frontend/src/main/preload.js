@@ -63,7 +63,6 @@ contextBridge.exposeInMainWorld('studyflow', {
   memoryGetAll:   ()            => ipcRenderer.invoke('memory-get-all'),
   memorySet:      (key, value)  => ipcRenderer.invoke('memory-set', key, value),
   onboardingChat: (payload)     => ipcRenderer.invoke('onboarding-chat', payload),
-  testProviderKey: (provider, keyOverride)   => ipcRenderer.invoke('test-provider-key', provider, keyOverride),
   preferencesGet: ()            => ipcRenderer.invoke('preferences-get'),
 
   // ─── Title System ────────────────────────────────────────────────────
@@ -144,6 +143,8 @@ contextBridge.exposeInMainWorld('studyflow', {
   authLogin:    (email, password)           => ipcRenderer.invoke('auth-login', email, password),
   authLogout:   ()                          => ipcRenderer.invoke('auth-logout'),
   authGetCurrentUser: ()                    => ipcRenderer.invoke('auth-get-current-user'),
+  setActiveUser:   (user)                   => ipcRenderer.invoke('set-active-user', user),
+  clearActiveUser: ()                       => ipcRenderer.invoke('clear-active-user'),
 
   // ─── Session Token Bridge (Phase 2 — FastAPI persistent sessions) ────
   // The renderer's SessionManager uses these to store / retrieve the
@@ -153,10 +154,20 @@ contextBridge.exposeInMainWorld('studyflow', {
   sessionLoad:  ()        => ipcRenderer.invoke('session-token-load'),
   sessionClear: ()        => ipcRenderer.invoke('session-token-clear'),
 
+  // ─── Backend Configuration ───────────────────────────────────────────
+  backendUrl: process.env.STUDYFLOW_BACKEND_URL || 'http://127.0.0.1:8000',
+
   // ─── Backend Health Check ─────────────────────────────────────────────
   // Returns true if the FastAPI backend is reachable.  Used by the
   // sync-manager and offline mode to detect connectivity.
   backendPing: () => ipcRenderer.invoke('backend-ping'),
+
+  // ─── Page Navigation (Phase 2 — used after FastAPI auth) ─────────────
+  // AuthGateway calls this after a successful FastAPI login/logout to tell
+  // the main process which HTML file to load.  The main process is the
+  // only entity allowed to call mainWindow.loadFile().
+  navigateToMain:  () => ipcRenderer.invoke('navigate-to-main'),   // → index.html
+  navigateToLogin: () => ipcRenderer.invoke('navigate-to-login'),  // → login.html
 
   // ─── Cleanup ─────────────────────────────────────────────────────────
   removeAllListeners: (channel) => ipcRenderer.removeAllListeners(channel)

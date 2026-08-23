@@ -54,11 +54,11 @@ class AuthService:
         password: str,
         device_label: Optional[str] = None,
         ip_address: Optional[str] = None,
-    ) -> tuple[User, str]:
+    ) -> tuple[User, str, str]:
         """
         Creates a new user and immediately opens a desktop session.
 
-        Returns: (user, plaintext_session_token)
+        Returns: (user, plaintext_session_token, otp_code)
         The caller returns the plaintext token to the Electron client;
         only the hash is persisted.
         """
@@ -87,7 +87,7 @@ class AuthService:
 
         # Re-fetch user to get all fields (e.g. created_at) after the flush
         await self.db.refresh(user)
-        return user, token
+        return user, token, otp
 
     # ─── Login ────────────────────────────────────────────────────────────────
 
@@ -255,7 +255,7 @@ class AuthService:
             user.otp_code != otp_code
             or user.otp_purpose != purpose
             or not user.otp_expires_at
-            or user.otp_expires_at.replace(tzinfo=timezone.utc) < now
+            or user.otp_expires_at.astimezone(timezone.utc) < now
         ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

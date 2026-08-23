@@ -7,47 +7,80 @@
  *   - The session token is stored securely in the main process via
  *     Electron safeStorage (DPAPI on Windows, Keychain on macOS).
  *   - The renderer accesses it exclusively through the preload bridge
- *     (window.studyflow.session.*).
- *   - In memory, the token is cached in the api-client so every
+ *     (window.studyflow.sessionSave / sessionLoad / sessionClear).
+ *   - In memory, the token is cached in window.api so every
  *     HTTP request automatically sends it in the Authorization header.
  *
- * This mirrors the existing session-manager.js in the main process but
- * operates on the renderer side, delegating storage to the main process
- * via IPC.
- *
  * Session lifecycle:
- *   1. login/register  → save token via IPC → cache in api-client
+ *   1. login/register  → save token via IPC → cache in window.api
  *   2. app launch      → load token via IPC → validate with backend → cache
- *   3. logout          → clear token via IPC → clear from api-client
+ *   3. logout          → clear token via IPC → clear from window.api
+ *
+ * Global: window.SessionManager
+ * Depends on: window.api (api-client.js must be loaded first)
  */
 
 'use strict';
 
-const api = require('../api/api-client');
+window.SessionManager = {
+  _currentUser: null,
 
-const SessionManager = {
   /**
    * Saves the session token persistently via the main-process IPC bridge.
    * The main process stores it using safeStorage (OS-native encryption).
    */
-  async saveToken(token) {
+  async saveToken(token, user = null) {
     try {
-      // Store via the existing IPC bridge that we'll add to preload.js
       if (window.studyflow?.sessionSave) {
         await window.studyflow.sessionSave(token);
       }
-      // Also cache in api-client so requests work immediately
-      api.setToken(token);
+      // Cache in memory so requests work immediately
+      window.api.setToken(token);
+      if (user) {
+        this.setUser(user);
+      }
     } catch (err) {
       console.error('[SessionManager] Failed to save token:', err);
-      // Still set in memory even if persist failed
-      api.setToken(token);
+      window.api.setToken(token);
+      if (user) {
+        this.setUser(user);
+      }
     }
   },
 
   /**
-   * Loads the session token from persistent storage and caches it in
-   * the api-client.
+   * Sets the active user in memory and notifies main process.
+   */
+  setUser(user) {
+    this._currentUser = user || null;
+    if (user && window.studyflow?.setActiveUser) {
+      window.studyflow.setActiveUser(user).catch(err => {
+        console.warn('[SessionManager] Failed to set active user in main process:', err);
+      });
+    }
+  },
+
+  /**
+   * Gets the active user.
+   */
+  getUser() {
+    return this._currentUser;
+  },
+
+  /**
+   * Clears the active user.
+   */
+  clearUser() {
+    this._currentUser = null;
+    if (window.studyflow?.clearActiveUser) {
+      window.studyflow.clearActiveUser().catch(err => {
+        console.warn('[SessionManager] Failed to clear active user in main process:', err);
+      });
+    }
+  },
+
+  /**
+   * Loads the session token from persistent storage and caches it in window.api.
    * @returns {string|null} the token, or null if none stored
    */
   async loadToken() {
@@ -57,7 +90,7 @@ const SessionManager = {
         // main.js returns { success, token } — unwrap it
         const token = res?.token || (typeof res === 'string' ? res : null);
         if (token) {
-          api.setToken(token);
+          window.api.setToken(token);
           return token;
         }
       }
@@ -79,20 +112,17 @@ const SessionManager = {
     } catch (err) {
       console.error('[SessionManager] Failed to clear token:', err);
     }
-    api.clearToken();
+    this.clearUser();
+    window.api.clearToken();
   },
 
   /** Returns the current in-memory token (fast, synchronous). */
   getToken() {
-    return api.getToken();
+    return window.api.getToken();
   },
 
   /** Returns true if a token is currently loaded. */
   isLoggedIn() {
-    return !!api.getToken();
+    return !!window.api.getToken();
   },
 };
-
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = SessionManager;
-}

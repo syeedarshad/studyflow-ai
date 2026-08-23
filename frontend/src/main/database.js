@@ -23,6 +23,31 @@ const logger = require('./logger');
 
 const SECRET_SETTING_KEYS = new Set(['gemini_api_key', 'groq_api_key']);
 
+/**
+ * SETTINGS_DEFAULTS — canonical in-memory defaults for all user settings.
+ *
+ * These are NEVER written to the database as null-user rows. Instead:
+ *  - getSetting()    falls back to this map when no user-scoped row exists.
+ *  - getAllSettings() uses this as the base layer, then overlays user rows.
+ *  - setSetting()    only writes when activeUserId !== null.
+ *
+ * Why no DB rows? SQLite's UNIQUE constraint treats every NULL as distinct,
+ * so UNIQUE(key, user_id) provides ZERO deduplication protection when
+ * user_id IS NULL — INSERT OR IGNORE creates a new row on every app launch.
+ * Keeping defaults purely in code is the only way to guarantee exactly-once
+ * semantics without schema gymnastics.
+ */
+const SETTINGS_DEFAULTS = Object.freeze({
+  user_name:      'Student',
+  daily_xp_goal:  '100',
+  theme:          'dark',
+  gemini_api_key: '',
+  groq_api_key:   '',
+  notifications:  'true',
+  focus_duration: '25',
+  break_duration: '5',
+});
+
 let Database;
 try {
   Database = require('better-sqlite3');
@@ -48,7 +73,19 @@ class StudyFlowDB {
     this.analyticsRepository = new AnalyticsRepository(this.db);
     this.notesRepository = new NotesRepository(this.db);
     this.userRepository = new UserRepository(this.db);
+    this.activeUserId = null;
     this.init();
+  }
+
+  setActiveUser(userId) {
+    this.activeUserId = (userId !== undefined && userId !== null && userId !== '')
+      ? (typeof userId === 'number' ? userId : parseInt(userId, 10) || userId)
+      : null;
+    if (this.examRepository) this.examRepository.setActiveUser(this.activeUserId);
+    if (this.roadmapRepository) this.roadmapRepository.setActiveUser(this.activeUserId);
+    if (this.goalRepository) this.goalRepository.setActiveUser(this.activeUserId);
+    if (this.analyticsRepository) this.analyticsRepository.setActiveUser(this.activeUserId);
+    if (this.notesRepository) this.notesRepository.setActiveUser(this.activeUserId);
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -68,6 +105,7 @@ class StudyFlowDB {
 
       CREATE TABLE IF NOT EXISTS tasks (
         id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id            INTEGER DEFAULT NULL,
         title              TEXT NOT NULL,
         category           TEXT NOT NULL,
         priority           TEXT DEFAULT 'medium',
@@ -86,6 +124,7 @@ class StudyFlowDB {
 
       CREATE TABLE IF NOT EXISTS sessions (
         id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id          INTEGER DEFAULT NULL,
         task_id          INTEGER,
         category         TEXT,
         type             TEXT DEFAULT 'focus',
@@ -98,6 +137,7 @@ class StudyFlowDB {
 
       CREATE TABLE IF NOT EXISTS xp_log (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id     INTEGER DEFAULT NULL,
         amount      INTEGER NOT NULL,
         reason      TEXT,
         category    TEXT,
@@ -106,13 +146,15 @@ class StudyFlowDB {
 
       CREATE TABLE IF NOT EXISTS streaks (
         id               INTEGER PRIMARY KEY AUTOINCREMENT,
-        date             TEXT UNIQUE DEFAULT (date('now')),
+        user_id          INTEGER DEFAULT NULL,
+        date             TEXT DEFAULT (date('now')),
         tasks_completed  INTEGER DEFAULT 0
       );
 
       CREATE TABLE IF NOT EXISTS achievements (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        badge_id    TEXT UNIQUE,
+        user_id     INTEGER DEFAULT NULL,
+        badge_id    TEXT,
         name        TEXT,
         description TEXT,
         icon        TEXT,
@@ -120,12 +162,16 @@ class StudyFlowDB {
       );
 
       CREATE TABLE IF NOT EXISTS settings (
-        key   TEXT PRIMARY KEY,
-        value TEXT
+        id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER DEFAULT NULL,
+        key     TEXT,
+        value   TEXT,
+        UNIQUE(key, user_id)
       );
 
       CREATE TABLE IF NOT EXISTS notes (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id    INTEGER DEFAULT NULL,
         title      TEXT,
         content    TEXT,
         is_pinned  INTEGER DEFAULT 0,
@@ -135,7 +181,8 @@ class StudyFlowDB {
 
       CREATE TABLE IF NOT EXISTS wellness (
         id             INTEGER PRIMARY KEY AUTOINCREMENT,
-        date           TEXT UNIQUE DEFAULT (date('now')),
+        user_id        INTEGER DEFAULT NULL,
+        date           TEXT DEFAULT (date('now')),
         water_glasses  INTEGER DEFAULT 0,
         exercise_done  INTEGER DEFAULT 0,
         sleep_hours    REAL DEFAULT 0,
@@ -145,6 +192,7 @@ class StudyFlowDB {
 
       CREATE TABLE IF NOT EXISTS planner_entries (
         id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id        INTEGER DEFAULT NULL,
         date           TEXT,
         available_hours REAL,
         energy_level   TEXT,
@@ -154,6 +202,7 @@ class StudyFlowDB {
 
       CREATE TABLE IF NOT EXISTS pending_plans (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id     INTEGER DEFAULT NULL,
         type        TEXT NOT NULL,
         prompt      TEXT,
         payload     TEXT NOT NULL,
@@ -165,6 +214,7 @@ class StudyFlowDB {
 
       CREATE TABLE IF NOT EXISTS habit_logs (
         id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id            INTEGER DEFAULT NULL,
         task_id            INTEGER,
         category           TEXT,
         event              TEXT NOT NULL,
@@ -175,14 +225,17 @@ class StudyFlowDB {
       );
 
       CREATE TABLE IF NOT EXISTS ai_memory (
-        key        TEXT PRIMARY KEY,
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id    INTEGER DEFAULT NULL,
+        key        TEXT,
         value      TEXT,
         updated_at TEXT DEFAULT (datetime('now'))
       );
 
       CREATE TABLE IF NOT EXISTS productivity_scores (
         id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-        date               TEXT UNIQUE DEFAULT (date('now')),
+        user_id            INTEGER DEFAULT NULL,
+        date               TEXT DEFAULT (date('now')),
         daily_score        INTEGER DEFAULT 0,
         weekly_score       INTEGER DEFAULT 0,
         focus_score        INTEGER DEFAULT 0,
@@ -190,21 +243,11 @@ class StudyFlowDB {
       );
     `);
 
-    const defaultSettings = [
-      ['user_name',       'Student'],
-      ['daily_xp_goal',   '100'],
-      ['theme',           'dark'],
-      ['gemini_api_key',  ''],
-      ['groq_api_key',    ''],
-      ['notifications',   'true'],
-      ['focus_duration',  '25'],
-      ['break_duration',  '5']
-    ];
+    // Default settings are now pure in-memory constants (SETTINGS_DEFAULTS).
+    // No null-user rows are written to the database — SQLite's UNIQUE constraint
+    // does NOT protect against duplicate (key, NULL) pairs, so any DB-based
+    // default-seeding approach is inherently unsafe across multiple launches.
 
-    const insert = this.db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
-    defaultSettings.forEach(([k, v]) => insert.run(k, v));
-
-    this.db.prepare("INSERT OR IGNORE INTO wellness (date) VALUES (date('now'))").run();
     this.ensureStreak();
     this.runMigrations();
     this.migrateApiKeysToEncrypted();
@@ -241,6 +284,7 @@ class StudyFlowDB {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS saved_sessions (
         id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id          INTEGER DEFAULT NULL,
         title            TEXT NOT NULL,
         session_type     TEXT NOT NULL,
         duration_minutes INTEGER NOT NULL,
@@ -254,6 +298,7 @@ class StudyFlowDB {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS user_preferences (
         id                      INTEGER PRIMARY KEY CHECK (id = 1),
+        user_id                 INTEGER DEFAULT NULL,
         preferred_study_time    TEXT,
         energy_level            TEXT,
         focus_duration          INTEGER,
@@ -274,6 +319,7 @@ class StudyFlowDB {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS daily_quests (
         id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id      INTEGER DEFAULT NULL,
         date         TEXT NOT NULL,
         quest_key    TEXT NOT NULL,
         title        TEXT NOT NULL,
@@ -298,6 +344,7 @@ class StudyFlowDB {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS goals (
         id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id             INTEGER DEFAULT NULL,
         title               TEXT NOT NULL,
         description         TEXT,
         goal_type           TEXT DEFAULT 'custom',
@@ -319,6 +366,7 @@ class StudyFlowDB {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS career_roadmaps (
         id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id      INTEGER DEFAULT NULL,
         title        TEXT NOT NULL,
         target_role  TEXT NOT NULL,
         description  TEXT,
@@ -345,6 +393,7 @@ class StudyFlowDB {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS exam_preps (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id     INTEGER DEFAULT NULL,
         exam_name   TEXT NOT NULL,
         exam_date   TEXT,
         description TEXT,
@@ -358,6 +407,7 @@ class StudyFlowDB {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS time_blocks (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id    INTEGER DEFAULT NULL,
         date       TEXT NOT NULL,
         start_time TEXT NOT NULL,
         end_time   TEXT NOT NULL,
@@ -374,6 +424,7 @@ class StudyFlowDB {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS semesters (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id    INTEGER DEFAULT NULL,
         name       TEXT NOT NULL,
         start_date TEXT,
         end_date   TEXT,
@@ -396,6 +447,7 @@ class StudyFlowDB {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS coach_messages (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id    INTEGER DEFAULT NULL,
         role       TEXT NOT NULL,
         content    TEXT NOT NULL,
         created_at TEXT DEFAULT (datetime('now'))
@@ -467,6 +519,86 @@ class StudyFlowDB {
       ON goals(normalized_title)
       WHERE status = 'active';
     `);
+
+    // ── Foreign Key Actions migration ───────────────────────────────────
+    this.migrateForeignKeyActions();
+
+    // ── Multi-Account Isolation: user_id scoping migration ──────────────
+    const tablesToScope = [
+      'tasks', 'sessions', 'xp_log', 'streaks', 'achievements',
+      'settings', 'notes', 'wellness', 'planner_entries', 'pending_plans',
+      'habit_logs', 'ai_memory', 'productivity_scores', 'saved_sessions',
+      'user_preferences', 'daily_quests', 'goals', 'exam_preps',
+      'career_roadmaps', 'time_blocks', 'semesters', 'coach_messages'
+    ];
+
+    for (const table of tablesToScope) {
+      try {
+        const cols = this.db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+        if (cols.length && !cols.includes('user_id')) {
+          this.db.exec(`ALTER TABLE ${table} ADD COLUMN user_id INTEGER DEFAULT NULL`);
+        }
+      } catch (err) {
+        // Table might not exist yet
+      }
+    }
+
+    for (const table of tablesToScope) {
+      try {
+        this.db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_user_id ON ${table}(user_id)`);
+      } catch (err) {}
+    }
+
+    // ── Settings: purge legacy null-user rows + enforce uniqueness ────────
+    //
+    // Background: prior versions ran `INSERT OR IGNORE INTO settings (key, value)`
+    // at startup to seed defaults with user_id = NULL.  Because SQLite's UNIQUE
+    // constraint treats every NULL as distinct from every other NULL, that INSERT
+    // succeeded on every app launch, creating a new duplicate row each time.
+    //
+    // The default-seeding block has been removed.  Defaults are now served
+    // from the in-memory SETTINGS_DEFAULTS constant.  This migration:
+    //   1. Deletes null-user rows whose value matches a known default (i.e. rows
+    //      that were injected by the app, not written by a real user).
+    //   2. Deduplicates any remaining null-user rows (keeps lowest id).
+    //   3. Creates the unique index on (key, user_id).
+    //      Note: even with the index the constraint cannot protect null-user rows
+    //      (SQLite NULL != NULL), but it does protect authenticated-user rows.
+    try {
+      const hasCols = this.db.prepare('PRAGMA table_info(settings)').all().map(c => c.name);
+      if (hasCols.includes('id')) {
+        // Step 1: delete null-user rows that are still at their default value.
+        // These were injected by the app and are now superseded by SETTINGS_DEFAULTS.
+        // Rows that were explicitly customised by the user (value != default) are
+        // left alone on disk \u2014 they will not be surfaced to any authenticated session
+        // but they remain for forensic/recovery purposes.
+        const defaultEntries = Object.entries(SETTINGS_DEFAULTS);
+        if (defaultEntries.length > 0) {
+          const placeholders = defaultEntries.map(() => '(key = ? AND value = ?)').join(' OR ');
+          const params = defaultEntries.flatMap(([k, v]) => [k, v]);
+          this.db.prepare(
+            `DELETE FROM settings WHERE user_id IS NULL AND (${placeholders})`
+          ).run(...params);
+        }
+
+        // Step 2: collapse any remaining null-user duplicates (keep lowest id).
+        this.db.exec(`
+          DELETE FROM settings
+          WHERE id NOT IN (
+            SELECT MIN(id) FROM settings GROUP BY key, user_id
+          )
+        `);
+      }
+
+      // Step 3: unique index.  Protects authenticated rows; cannot protect
+      // null-user rows due to SQLite NULL semantics, but that is acceptable
+      // because setSetting() now rejects all null-user writes.
+      this.db.exec(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_key_user ON settings(key, user_id)`
+      );
+    } catch (err) {
+      logger.warn('[MIGRATION] settings cleanup failed (non-fatal):', err.message);
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -501,9 +633,13 @@ class StudyFlowDB {
     }
 
     const rebuild = (table, createSql, columns) => {
+      const cols = this.db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+      const colArray = columns.split(',').map(s => s.trim());
+      const availableCols = colArray.filter(c => cols.includes(c));
+      const colList = availableCols.join(', ');
       const before = this.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
       this.db.exec(createSql.replace(new RegExp(`CREATE TABLE ${table}`), `CREATE TABLE ${table}_new`));
-      this.db.exec(`INSERT INTO ${table}_new (${columns}) SELECT ${columns} FROM ${table}`);
+      this.db.exec(`INSERT INTO ${table}_new (${colList}) SELECT ${colList} FROM ${table}`);
       const after = this.db.prepare(`SELECT COUNT(*) AS n FROM ${table}_new`).get().n;
       if (after !== before) {
         throw new Error(`FK migration row-count mismatch on ${table}: ${before} -> ${after}. Aborting.`);
@@ -535,6 +671,7 @@ class StudyFlowDB {
       rebuild('sessions', `
         CREATE TABLE sessions (
           id                INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id           INTEGER DEFAULT NULL,
           task_id           INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
           category          TEXT,
           type              TEXT DEFAULT 'focus',
@@ -543,12 +680,13 @@ class StudyFlowDB {
           started_at        TEXT DEFAULT (datetime('now')),
           ended_at          TEXT
         )
-      `, 'id, task_id, category, type, duration_minutes, is_focus_mode, started_at, ended_at');
+      `, 'id, user_id, task_id, category, type, duration_minutes, is_focus_mode, started_at, ended_at');
 
       // time_blocks.task_id -> tasks(id): same reasoning as sessions.
       rebuild('time_blocks', `
         CREATE TABLE time_blocks (
           id          INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id     INTEGER DEFAULT NULL,
           date        TEXT NOT NULL,
           start_time  TEXT NOT NULL,
           end_time    TEXT NOT NULL,
@@ -559,7 +697,7 @@ class StudyFlowDB {
           is_fixed    INTEGER DEFAULT 0,
           created_at  TEXT DEFAULT (datetime('now'))
         )
-      `, 'id, date, start_time, end_time, title, category, block_type, task_id, is_fixed, created_at');
+      `, 'id, user_id, date, start_time, end_time, title, category, block_type, task_id, is_fixed, created_at');
 
       // roadmap_milestones.roadmap_id -> career_roadmaps(id) NOT NULL:
       // a milestone is meaningless without its parent roadmap, so cascade.
@@ -600,6 +738,7 @@ class StudyFlowDB {
       rebuild('tasks', `
         CREATE TABLE tasks (
           id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id             INTEGER DEFAULT NULL,
           title               TEXT NOT NULL,
           category            TEXT NOT NULL,
           priority            TEXT DEFAULT 'medium',
@@ -615,7 +754,7 @@ class StudyFlowDB {
           created_at          TEXT DEFAULT (datetime('now')),
           completed_at        TEXT
         )
-      `, 'id, title, category, priority, status, xp_reward, due_date, reminder_time, is_recurring, recurrence_pattern, notes, estimated_minutes, goal_id, created_at, completed_at');
+      `, 'id, user_id, title, category, priority, status, xp_reward, due_date, reminder_time, is_recurring, recurrence_pattern, notes, estimated_minutes, goal_id, created_at, completed_at');
       // Re-create the dedup guard index dropped along with the old table.
       this.db.exec(`
         CREATE UNIQUE INDEX IF NOT EXISTS idx_task_unique
@@ -627,6 +766,7 @@ class StudyFlowDB {
       rebuild('daily_quests', `
         CREATE TABLE daily_quests (
           id           INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id      INTEGER DEFAULT NULL,
           date         TEXT NOT NULL,
           quest_key    TEXT NOT NULL,
           title        TEXT NOT NULL,
@@ -640,7 +780,7 @@ class StudyFlowDB {
           created_at   TEXT DEFAULT (datetime('now')),
           UNIQUE(date, quest_key)
         )
-      `, 'id, date, quest_key, title, description, target, progress, xp_reward, status, goal_id, completed_at, created_at');
+      `, 'id, user_id, date, quest_key, title, description, target, progress, xp_reward, status, goal_id, completed_at, created_at');
 
       // Verify: with FKs re-enabled below, this must report zero problems.
       // (foreign_key_check itself is a read-only diagnostic — safe to run
@@ -697,7 +837,9 @@ class StudyFlowDB {
   }
 
   ensureStreak() {
-    this.db.prepare("INSERT OR IGNORE INTO streaks (date) VALUES (date('now'))").run();
+    const uid = this.activeUserId;
+    if (uid === null) return;
+    this.db.prepare("INSERT OR IGNORE INTO streaks (date, user_id) VALUES (date('now'), ?)").run(uid);
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -705,34 +847,53 @@ class StudyFlowDB {
   // ═══════════════════════════════════════════════════════════════════════
 
   getSetting(key) {
-    const row = this.db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
-    if (!row) return null;
-    if (SECRET_SETTING_KEYS.has(key)) return secureStore.decrypt(row.value);
-    return row.value;
+    const uid = this.activeUserId;
+    // 1. Try user-scoped row first.
+    if (uid !== null) {
+      const row = this.db.prepare('SELECT value FROM settings WHERE key = ? AND user_id = ?').get(key, uid);
+      if (row) {
+        return SECRET_SETTING_KEYS.has(key) ? secureStore.decrypt(row.value) : row.value;
+      }
+    }
+    // 2. Fall back to in-memory default — never read null-user DB rows.
+    //    Null-user DB rows were an artifact of an earlier buggy initialisation
+    //    path (INSERT OR IGNORE with user_id = NULL) that has been removed.
+    //    We preserve those rows on disk for data safety but ignore them here.
+    return key in SETTINGS_DEFAULTS ? SETTINGS_DEFAULTS[key] : null;
   }
 
   setSetting(key, value) {
+    const uid = this.activeUserId;
+    // Reject unauthenticated writes — settings must always be user-owned.
+    if (uid === null) return null;
+
     let storedValue = value;
     if (SECRET_SETTING_KEYS.has(key) && value) {
       try {
         storedValue = secureStore.encrypt(value);
       } catch (err) {
-        // OS-level encryption unavailable on this machine — fall back to
-        // plaintext rather than losing the key entirely, but log loudly
-        // so it's visible in support requests / the log file.
         logger.warn(`setSetting(${key}): safeStorage unavailable, storing plaintext fallback:`, err.message);
         storedValue = value;
       }
     }
-    return this.db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, storedValue);
+    const existing = this.db.prepare('SELECT 1 FROM settings WHERE key = ? AND user_id = ?').get(key, uid);
+    if (existing) {
+      return this.db.prepare('UPDATE settings SET value = ? WHERE key = ? AND user_id = ?').run(storedValue, key, uid);
+    }
+    return this.db.prepare('INSERT INTO settings (key, value, user_id) VALUES (?, ?, ?)').run(key, storedValue, uid);
   }
 
   getAllSettings() {
-    const rows = this.db.prepare('SELECT key, value FROM settings').all();
-    const obj = {};
-    rows.forEach(r => {
-      obj[r.key] = SECRET_SETTING_KEYS.has(r.key) ? secureStore.decrypt(r.value) : r.value;
-    });
+    const uid = this.activeUserId;
+    // Start from in-memory defaults (never from null-user DB rows).
+    const obj = { ...SETTINGS_DEFAULTS };
+    // Overlay with user-scoped rows from the database.
+    if (uid !== null) {
+      const rows = this.db.prepare('SELECT key, value FROM settings WHERE user_id = ?').all(uid);
+      rows.forEach(r => {
+        obj[r.key] = SECRET_SETTING_KEYS.has(r.key) ? secureStore.decrypt(r.value) : r.value;
+      });
+    }
     return obj;
   }
 
@@ -743,22 +904,49 @@ class StudyFlowDB {
    * keys keep working without requiring them to re-enter anything.
    */
   migrateApiKeysToEncrypted() {
-    const done = this.db.prepare("SELECT value FROM settings WHERE key='api_keys_encrypted_v1'").get();
-    if (done && done.value === '1') return;
+    const uid = this.activeUserId;
+    if (uid !== null) {
+      const userDone = this.db.prepare(
+        "SELECT value FROM settings WHERE key='api_keys_encrypted_v1' AND user_id = ?"
+      ).get(uid);
+      if (userDone && userDone.value === '1') return;
+    }
+    const globalDone = this.db.prepare(
+      "SELECT value FROM settings WHERE key='api_keys_encrypted_v1'"
+    ).get();
+    if (globalDone && globalDone.value === '1') return;
 
     for (const key of SECRET_SETTING_KEYS) {
-      const row = this.db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
-      if (row && row.value && !secureStore.isEncrypted(row.value)) {
-        try {
-          const encrypted = secureStore.encrypt(row.value);
-          this.db.prepare('UPDATE settings SET value = ? WHERE key = ?').run(encrypted, key);
-          logger.info(`Migrated ${key} to encrypted storage.`);
-        } catch (err) {
-          logger.warn(`Could not encrypt existing ${key} (safeStorage unavailable) — left as plaintext:`, err.message);
+      const rows = uid !== null
+        ? this.db.prepare('SELECT id, value FROM settings WHERE key = ? AND user_id = ?').all(key, uid)
+        : [];
+      for (const row of rows) {
+        if (row.value && !secureStore.isEncrypted(row.value)) {
+          try {
+            const encrypted = secureStore.encrypt(row.value);
+            this.db.prepare('UPDATE settings SET value = ? WHERE id = ?').run(encrypted, row.id);
+            logger.info(`Migrated ${key} (row ${row.id}) to encrypted storage.`);
+          } catch (err) {
+            logger.warn(`Could not encrypt existing ${key}:`, err.message);
+          }
         }
       }
     }
-    this.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('api_keys_encrypted_v1', '1')").run();
+
+    if (uid !== null) {
+      const existing = this.db.prepare(
+        "SELECT 1 FROM settings WHERE key='api_keys_encrypted_v1' AND user_id = ?"
+      ).get(uid);
+      if (existing) {
+        this.db.prepare(
+          "UPDATE settings SET value = '1' WHERE key='api_keys_encrypted_v1' AND user_id = ?"
+        ).run(uid);
+      } else {
+        this.db.prepare(
+          "INSERT INTO settings (key, value, user_id) VALUES ('api_keys_encrypted_v1', '1', ?)"
+        ).run(uid);
+      }
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -766,19 +954,27 @@ class StudyFlowDB {
   // ═══════════════════════════════════════════════════════════════════════
 
   awardXP(amount, reason, category) {
-    this.db.prepare('INSERT INTO xp_log (amount, reason, category) VALUES (?, ?, ?)').run(amount, reason, category || 'General');
+    const uid = this.activeUserId;
+    if (uid === null) return;
+    this.db.prepare('INSERT INTO xp_log (amount, reason, category, user_id) VALUES (?, ?, ?, ?)').run(amount, reason, category || 'General', uid);
   }
 
   getTotalXP() {
-    return this.db.prepare('SELECT COALESCE(SUM(amount),0) as total FROM xp_log').get().total;
+    const uid = this.activeUserId;
+    if (uid === null) return 0;
+    return this.db.prepare('SELECT COALESCE(SUM(amount),0) as total FROM xp_log WHERE user_id = ?').get(uid).total;
   }
 
   getTodayXP() {
-    return this.db.prepare(`SELECT COALESCE(SUM(amount),0) as total FROM xp_log WHERE date(earned_at)=date('now')`).get().total;
+    const uid = this.activeUserId;
+    if (uid === null) return 0;
+    return this.db.prepare(`SELECT COALESCE(SUM(amount),0) as total FROM xp_log WHERE date(earned_at)=date('now') AND user_id = ?`).get(uid).total;
   }
 
   getXPLog(limit = 20) {
-    return this.db.prepare('SELECT * FROM xp_log ORDER BY earned_at DESC LIMIT ?').all(limit);
+    const uid = this.activeUserId;
+    if (uid === null) return [];
+    return this.db.prepare('SELECT * FROM xp_log WHERE user_id = ? ORDER BY earned_at DESC LIMIT ?').all(uid, limit);
   }
 
   getLevel(totalXP) {
@@ -844,9 +1040,11 @@ class StudyFlowDB {
   // ═══════════════════════════════════════════════════════════════════════
 
   getStreak() {
+    const uid = this.activeUserId;
+    if (uid === null) return 0;
     const rows = this.db.prepare(`
-      SELECT date FROM streaks WHERE tasks_completed > 0 ORDER BY date DESC
-    `).all();
+      SELECT date FROM streaks WHERE tasks_completed > 0 AND user_id = ? ORDER BY date DESC
+    `).all(uid);
     if (!rows.length) return 0;
     let streak = 0;
     let current = new Date();
@@ -863,9 +1061,11 @@ class StudyFlowDB {
   }
 
   getStreakHistory(days = 30) {
+    const uid = this.activeUserId;
+    if (uid === null) return [];
     return this.db.prepare(`
-      SELECT * FROM streaks WHERE date >= date('now', '-' || ? || ' days') ORDER BY date ASC
-    `).all(days);
+      SELECT * FROM streaks WHERE date >= date('now', '-' || ? || ' days') AND user_id = ? ORDER BY date ASC
+    `).all(days, uid);
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -873,8 +1073,14 @@ class StudyFlowDB {
   // ═══════════════════════════════════════════════════════════════════════
 
   getTasks(filter = {}) {
-    let sql = 'SELECT * FROM tasks WHERE 1=1';
+    const uid = this.activeUserId;
+    if (uid === null && !filter.allow_unowned) return [];
+    let sql = `SELECT * FROM tasks WHERE status != 'deleted'`;
     const params = [];
+    if (uid !== null) {
+      sql += ' AND user_id = ?';
+      params.push(uid);
+    }
     if (filter.status)   { sql += ' AND status = ?';            params.push(filter.status); }
     if (filter.category) { sql += ' AND category = ?';          params.push(filter.category); }
     if (filter.date)     { sql += ' AND date(due_date) = ?';    params.push(filter.date); }
@@ -884,19 +1090,24 @@ class StudyFlowDB {
   }
 
   getTodayTasks() {
+    const uid = this.activeUserId;
+    if (uid === null) return [];
     return this.db.prepare(`
       SELECT * FROM tasks
-      WHERE (date(due_date) = date('now') OR due_date IS NULL OR due_date = '')
+      WHERE user_id = ?
+        AND (date(due_date) = date('now') OR due_date IS NULL OR due_date = '')
         AND status != 'deleted'
       ORDER BY CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, created_at ASC
-    `).all();
+    `).all(uid);
   }
 
   getAllPendingTasks() {
+    const uid = this.activeUserId;
+    if (uid === null) return [];
     return this.db.prepare(`
-      SELECT * FROM tasks WHERE status = 'pending' AND status != 'deleted'
+      SELECT * FROM tasks WHERE user_id = ? AND status = 'pending' AND status != 'deleted'
       ORDER BY due_date ASC, CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END
-    `).all();
+    `).all(uid);
   }
 
   /**
@@ -923,17 +1134,19 @@ class StudyFlowDB {
   }
 
   addTask(task) {
+    const uid = this.activeUserId;
+    if (uid === null) return null;
     const normalized = this.normalizeTask(task);
     const xpMap      = this.getXPMap();
     const xp         = xpMap[normalized.category?.toLowerCase()] || 10;
 
     const stmt = this.db.prepare(`
       INSERT INTO tasks (title, category, priority, due_date, reminder_time, is_recurring,
-                         recurrence_pattern, notes, xp_reward, estimated_minutes, goal_id)
+                         recurrence_pattern, notes, xp_reward, estimated_minutes, goal_id, user_id)
       VALUES (@title, @category, @priority, @due_date, @reminder_time, @is_recurring,
-              @recurrence_pattern, @notes, @xp_reward, @estimated_minutes, @goal_id)
+              @recurrence_pattern, @notes, @xp_reward, @estimated_minutes, @goal_id, @user_id)
     `);
-    return stmt.run({ ...normalized, xp_reward: xp });
+    return stmt.run({ ...normalized, xp_reward: xp, user_id: uid });
   }
 
   /**
@@ -943,6 +1156,18 @@ class StudyFlowDB {
    * when a plan is accepted more than once.
    */
   findTaskByTitleAndDate(title, dueDate, goalId) {
+    const uid = this.activeUserId;
+    if (uid !== null) {
+      return this.db.prepare(`
+        SELECT id FROM tasks
+        WHERE title    = ?
+          AND due_date = ?
+          AND goal_id  = ?
+          AND user_id  = ?
+          AND status  != 'deleted'
+        LIMIT 1
+      `).get(title, dueDate, goalId, uid) || null;
+    }
     return this.db.prepare(`
       SELECT id FROM tasks
       WHERE title    = ?
@@ -955,19 +1180,6 @@ class StudyFlowDB {
 
   /**
    * Phase 2A — One-time startup cleanup of legacy duplicate recurring tasks.
-   *
-   * Groups all non-deleted recurring tasks by (title, goal_id, recurrence_pattern).
-   * Within each group, preserves:
-   *   - Every completed task (history must stay intact)
-   *   - Every overdue/today pending task
-   *   - The single nearest future pending task
-   * Soft-deletes everything else (UPDATE status = 'deleted').
-   *
-   * This method is idempotent: running it multiple times is safe because
-   * already-deleted rows are excluded from the query and the nearest future
-   * task is always preserved before any deletions occur.
-   *
-   * @returns {{ deleted: number[], preserved: number[], skippedGroups: number }}
    */
   cleanupDuplicateGoals() {
     try {
@@ -1056,7 +1268,6 @@ class StudyFlowDB {
       }
 
       if (preservedIds.size === 0) {
-        // Safety: if somehow nothing qualifies to be preserved, skip the group
         skippedGroups++;
         continue;
       }
@@ -1080,28 +1291,34 @@ class StudyFlowDB {
     return { deleted: toDelete, preserved: toPreserve, skippedGroups };
   }
 
-
   updateTask(id, updates) {
+    const uid = this.activeUserId;
+    if (uid === null) return null;
     const allowed = ['title', 'category', 'priority', 'status', 'due_date',
                      'reminder_time', 'notes', 'is_recurring', 'recurrence_pattern',
                      'estimated_minutes', 'goal_id'];
     const fields = Object.keys(updates).filter(k => allowed.includes(k));
     if (!fields.length) return null;
     const setClause = fields.map(k => `${k} = @${k}`).join(', ');
-    return this.db.prepare(`UPDATE tasks SET ${setClause} WHERE id = @id`).run({ ...updates, id });
+    return this.db.prepare(`UPDATE tasks SET ${setClause} WHERE id = @id AND user_id = @uid`).run({ ...updates, id, uid });
   }
 
   deleteTask(id) {
-    return this.db.prepare(`UPDATE tasks SET status = 'deleted' WHERE id = ?`).run(id);
+    const uid = this.activeUserId;
+    if (uid === null) return null;
+    return this.db.prepare(`UPDATE tasks SET status = 'deleted' WHERE id = ? AND user_id = ?`).run(id, uid);
   }
 
   completeTask(id) {
-    const task = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id);
+    const uid = this.activeUserId;
+    if (uid === null) return null;
+
+    const task = this.db.prepare('SELECT * FROM tasks WHERE id = ? AND user_id = ?').get(id, uid);
     if (!task) return null;
 
-    this.db.prepare(`UPDATE tasks SET status='completed', completed_at=datetime('now') WHERE id=?`).run(id);
+    this.db.prepare(`UPDATE tasks SET status='completed', completed_at=datetime('now') WHERE id=? AND user_id=?`).run(id, uid);
     this.awardXP(task.xp_reward, `Completed: ${task.title}`, task.category);
-    this.db.prepare(`UPDATE streaks SET tasks_completed=tasks_completed+1 WHERE date=date('now')`).run();
+    this.db.prepare(`UPDATE streaks SET tasks_completed=tasks_completed+1 WHERE date=date('now') AND user_id=?`).run(uid);
     this.logHabit({ task_id: id, category: task.category, event: 'completed', completion_percent: 100 });
     this.checkAchievements();
 
@@ -1111,15 +1328,18 @@ class StudyFlowDB {
   }
 
   resolveOverdueTask(id, completionPercent, rolloverToTomorrow, remainingMinutes = null) {
-    const task = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id);
+    const uid = this.activeUserId;
+    if (uid === null) return null;
+
+    const task = this.db.prepare('SELECT * FROM tasks WHERE id = ? AND user_id = ?').get(id, uid);
     if (!task) return null;
 
     if (completionPercent >= 100) {
       this.completeTask(id);
     } else {
       this.db.prepare(`
-        UPDATE tasks SET status='completed', completed_at=datetime('now'), notes=@notes WHERE id=@id
-      `).run({ id, notes: `${task.notes || ''}\n[AI Coach] Completed ${completionPercent}% on ${today()}`.trim() });
+        UPDATE tasks SET status='completed', completed_at=datetime('now'), notes=@notes WHERE id=@id AND user_id=@uid
+      `).run({ id, uid, notes: `${task.notes || ''}\n[AI Coach] Completed ${completionPercent}% on ${today()}`.trim() });
 
       const partialXP = Math.round((task.xp_reward * completionPercent) / 100);
       if (partialXP > 0) this.awardXP(partialXP, `Partial (${completionPercent}%): ${task.title}`, task.category);
@@ -1153,13 +1373,16 @@ class StudyFlowDB {
   }
 
   getOverdueTasks() {
+    const uid = this.activeUserId;
+    if (uid === null) return [];
     return this.db.prepare(`
       SELECT * FROM tasks
-      WHERE status = 'pending'
+      WHERE user_id = ?
+        AND status = 'pending'
         AND due_date IS NOT NULL AND due_date != ''
         AND date(due_date) < date('now')
       ORDER BY due_date ASC
-    `).all();
+    `).all(uid);
   }
 
   getWeeklyStats() {
@@ -1179,10 +1402,11 @@ class StudyFlowDB {
   // ═══════════════════════════════════════════════════════════════════════
 
   addSession(session) {
+    const uid = this.activeUserId;
     return this.db.prepare(`
-      INSERT INTO sessions (task_id, category, type, duration_minutes, started_at, ended_at, is_focus_mode)
-      VALUES (@task_id, @category, @type, @duration_minutes, @started_at, @ended_at, @is_focus_mode)
-    `).run({ is_focus_mode: 0, ...session });
+      INSERT INTO sessions (task_id, category, type, duration_minutes, started_at, ended_at, is_focus_mode, user_id)
+      VALUES (@task_id, @category, @type, @duration_minutes, @started_at, @ended_at, @is_focus_mode, @user_id)
+    `).run({ is_focus_mode: 0, user_id: uid, ...session });
   }
 
   getTodayStudyMinutes() {
@@ -1190,9 +1414,11 @@ class StudyFlowDB {
   }
 
   getTodaySessions() {
+    const uid = this.activeUserId;
+    if (uid === null) return [];
     return this.db.prepare(`
-      SELECT * FROM sessions WHERE date(started_at)=date('now') ORDER BY started_at DESC
-    `).all();
+      SELECT * FROM sessions WHERE date(started_at)=date('now') AND user_id = ? ORDER BY started_at DESC
+    `).all(uid);
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -1220,23 +1446,29 @@ class StudyFlowDB {
   // ═══════════════════════════════════════════════════════════════════════
 
   getWellness(date = null) {
+    const uid = this.activeUserId;
+    if (uid === null) return null;
     const d = date || today();
-    this.db.prepare('INSERT OR IGNORE INTO wellness (date) VALUES (?)').run(d);
-    return this.db.prepare('SELECT * FROM wellness WHERE date = ?').get(d);
+    this.db.prepare('INSERT OR IGNORE INTO wellness (date, user_id) VALUES (?, ?)').run(d, uid);
+    return this.db.prepare('SELECT * FROM wellness WHERE date = ? AND user_id = ?').get(d, uid);
   }
 
   updateWellness(date, updates) {
+    const uid = this.activeUserId;
+    if (uid === null) return null;
     const allowed = ['water_glasses', 'exercise_done', 'sleep_hours', 'mood', 'notes'];
     const fields  = Object.keys(updates).filter(k => allowed.includes(k));
     if (!fields.length) return null;
     const setClause = fields.map(k => `${k} = @${k}`).join(', ');
-    return this.db.prepare(`UPDATE wellness SET ${setClause} WHERE date = @date`).run({ ...updates, date });
+    return this.db.prepare(`UPDATE wellness SET ${setClause} WHERE date = @date AND user_id = @uid`).run({ ...updates, date, uid });
   }
 
   getWellnessHistory(days = 7) {
+    const uid = this.activeUserId;
+    if (uid === null) return [];
     return this.db.prepare(`
-      SELECT * FROM wellness WHERE date >= date('now', '-' || ? || ' days') ORDER BY date ASC
-    `).all(days);
+      SELECT * FROM wellness WHERE date >= date('now', '-' || ? || ' days') AND user_id = ? ORDER BY date ASC
+    `).all(days, uid);
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -1244,13 +1476,17 @@ class StudyFlowDB {
   // ═══════════════════════════════════════════════════════════════════════
 
   getAchievements() {
-    return this.db.prepare('SELECT * FROM achievements ORDER BY earned_at DESC').all();
+    const uid = this.activeUserId;
+    if (uid === null) return [];
+    return this.db.prepare('SELECT * FROM achievements WHERE user_id = ? ORDER BY earned_at DESC').all(uid);
   }
 
   checkAchievements() {
+    const uid = this.activeUserId;
+    if (uid === null) return;
     const totalXP       = this.getTotalXP();
     const streak        = this.getStreak();
-    const completedCount = this.db.prepare(`SELECT COUNT(*) as c FROM tasks WHERE status='completed'`).get().c;
+    const completedCount = this.db.prepare(`SELECT COUNT(*) as c FROM tasks WHERE status='completed' AND user_id = ?`).get(uid).c;
 
     const badges = [
       { id: 'first_task',    name: 'First Step',     desc: 'Complete your first task',  icon: '🎯', condition: completedCount >= 1  },
@@ -1263,7 +1499,7 @@ class StudyFlowDB {
       { id: 'streak_30',     name: 'Monthly Master', desc: '30 day streak',             icon: '👑', condition: streak >= 30         }
     ];
 
-    // Feature 6 — Category-specific badges
+    // Category-specific badges
     const categoryBadgeDefs = [
       { category: 'DSA',          id: 'dsa_warrior',           name: 'DSA Warrior',           desc: 'Complete 15 DSA tasks',           icon: '🧩' },
       { category: 'Aptitude',     id: 'aptitude_master',       name: 'Aptitude Master',       desc: 'Complete 15 Aptitude tasks',      icon: '🧠' },
@@ -1280,8 +1516,8 @@ class StudyFlowDB {
     };
 
     const categoryCounts = this.db.prepare(`
-      SELECT category, COUNT(*) as c FROM tasks WHERE status='completed' GROUP BY category
-    `).all();
+      SELECT category, COUNT(*) as c FROM tasks WHERE status='completed' AND user_id = ? GROUP BY category
+    `).all(uid);
     const countsByCategory = {};
     categoryCounts.forEach(r => { countsByCategory[r.category] = r.c; });
 
@@ -1291,10 +1527,10 @@ class StudyFlowDB {
     });
 
     const insert = this.db.prepare(`
-      INSERT OR IGNORE INTO achievements (badge_id, name, description, icon, earned_at)
-      VALUES (?, ?, ?, ?, datetime('now'))
+      INSERT OR IGNORE INTO achievements (badge_id, name, description, icon, earned_at, user_id)
+      VALUES (?, ?, ?, ?, datetime('now'), ?)
     `);
-    badges.filter(b => b.condition).forEach(b => insert.run(b.id, b.name, b.desc, b.icon));
+    badges.filter(b => b.condition).forEach(b => insert.run(b.id, b.name, b.desc, b.icon, uid));
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -1302,15 +1538,19 @@ class StudyFlowDB {
   // ═══════════════════════════════════════════════════════════════════════
 
   savePendingPlan(type, prompt, payload, provider) {
+    const uid = this.activeUserId;
+    if (uid === null) return null;
     const result = this.db.prepare(`
-      INSERT INTO pending_plans (type, prompt, payload, provider, status)
-      VALUES (?, ?, ?, ?, 'pending')
-    `).run(type, prompt, JSON.stringify(payload), provider);
+      INSERT INTO pending_plans (type, prompt, payload, provider, status, user_id)
+      VALUES (?, ?, ?, ?, 'pending', ?)
+    `).run(type, prompt, JSON.stringify(payload), provider, uid);
     return this.getPendingPlan(result.lastInsertRowid);
   }
 
   getPendingPlan(id) {
-    const row = this.db.prepare('SELECT * FROM pending_plans WHERE id = ?').get(id);
+    const uid = this.activeUserId;
+    if (uid === null) return null;
+    const row = this.db.prepare('SELECT * FROM pending_plans WHERE id = ? AND user_id = ?').get(id, uid);
     if (row) {
       try { row.payload = JSON.parse(row.payload || '{}'); } catch { row.payload = {}; }
     }
@@ -1318,6 +1558,8 @@ class StudyFlowDB {
   }
 
   acceptPendingPlan(id) {
+    const uid = this.activeUserId;
+    if (uid === null) return null;
     const plan = this.getPendingPlan(id);
     if (!plan || plan.status !== 'pending') return null;
 
@@ -1329,12 +1571,14 @@ class StudyFlowDB {
       createdCount = (plan.payload || []).length;
     }
 
-    this.db.prepare(`UPDATE pending_plans SET status='accepted', resolved_at=datetime('now') WHERE id=?`).run(id);
+    this.db.prepare(`UPDATE pending_plans SET status='accepted', resolved_at=datetime('now') WHERE id=? AND user_id=?`).run(id, uid);
     return { plan, createdCount };
   }
 
   rejectPendingPlan(id) {
-    return this.db.prepare(`UPDATE pending_plans SET status='rejected', resolved_at=datetime('now') WHERE id=?`).run(id);
+    const uid = this.activeUserId;
+    if (uid === null) return null;
+    return this.db.prepare(`UPDATE pending_plans SET status='rejected', resolved_at=datetime('now') WHERE id=? AND user_id=?`).run(id, uid);
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -1342,20 +1586,24 @@ class StudyFlowDB {
   // ═══════════════════════════════════════════════════════════════════════
 
   logHabit({ task_id, category, event, completion_percent = 100 }) {
+    const uid = this.activeUserId;
+    if (uid === null) return null;
     const now = new Date();
     return this.db.prepare(`
-      INSERT INTO habit_logs (task_id, category, event, completion_percent, hour_of_day, day_of_week)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(task_id, category, event, completion_percent, now.getHours(), now.getDay());
+      INSERT INTO habit_logs (task_id, category, event, completion_percent, hour_of_day, day_of_week, user_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(task_id, category, event, completion_percent, now.getHours(), now.getDay(), uid);
   }
 
   logMissedTasks() {
+    const uid = this.activeUserId;
+    if (uid === null) return 0;
     const overdue = this.getOverdueTasks();
     const exists  = this.db.prepare(`
-      SELECT 1 FROM habit_logs WHERE task_id=? AND event='missed' AND date(logged_at)=date('now')
+      SELECT 1 FROM habit_logs WHERE task_id=? AND event='missed' AND date(logged_at)=date('now') AND user_id=?
     `);
     overdue.forEach(task => {
-      if (!exists.get(task.id)) {
+      if (!exists.get(task.id, uid)) {
         this.logHabit({ task_id: task.id, category: task.category, event: 'missed', completion_percent: 0 });
       }
     });
@@ -1363,10 +1611,19 @@ class StudyFlowDB {
   }
 
   getHabitInsights() {
+    const uid = this.activeUserId;
+    if (uid === null) {
+      return {
+        sampleSize: 0,
+        bestFocusHours: [], mostProductiveCategories: [],
+        commonlySkippedCategories: [], insightSentences: [],
+        message: 'Not enough data yet — keep using StudyFlow AI for a few days to unlock insights.'
+      };
+    }
     const logs = this.db.prepare(`
       SELECT category, event, completion_percent, hour_of_day, day_of_week
-      FROM habit_logs WHERE logged_at >= datetime('now','-30 days')
-    `).all();
+      FROM habit_logs WHERE logged_at >= datetime('now','-30 days') AND user_id = ?
+    `).all(uid);
 
     if (logs.length === 0) {
       return {
@@ -1464,9 +1721,9 @@ class StudyFlowDB {
     // Category speed comparison from sessions
     const sessionStats = this.db.prepare(`
       SELECT category, AVG(duration_minutes) as avg_minutes, COUNT(*) as samples
-      FROM sessions WHERE started_at >= datetime('now','-30 days') AND category IS NOT NULL AND category != ''
+      FROM sessions WHERE started_at >= datetime('now','-30 days') AND category IS NOT NULL AND category != '' AND user_id = ?
       GROUP BY category HAVING samples >= 2
-    `).all();
+    `).all(uid);
     if (sessionStats.length >= 2) {
       const sorted  = [...sessionStats].sort((a, b) => a.avg_minutes - b.avg_minutes);
       const fastest = sorted[0];
@@ -1494,6 +1751,14 @@ class StudyFlowDB {
   // ═══════════════════════════════════════════════════════════════════════
 
   setMemory(key, value) {
+    const uid = this.activeUserId;
+    if (uid !== null) {
+      const existing = this.db.prepare('SELECT 1 FROM ai_memory WHERE key = ? AND user_id = ?').get(key, uid);
+      if (existing) {
+        return this.db.prepare(`UPDATE ai_memory SET value = ?, updated_at = datetime('now') WHERE key = ? AND user_id = ?`).run(JSON.stringify(value), key, uid);
+      }
+      return this.db.prepare(`INSERT INTO ai_memory (key, value, updated_at, user_id) VALUES (?, ?, datetime('now'), ?)`).run(key, JSON.stringify(value), uid);
+    }
     return this.db.prepare(`
       INSERT INTO ai_memory (key, value, updated_at) VALUES (?,?,datetime('now'))
       ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=datetime('now')
@@ -1501,13 +1766,21 @@ class StudyFlowDB {
   }
 
   getMemory(key) {
-    const row = this.db.prepare('SELECT value FROM ai_memory WHERE key=?').get(key);
+    const uid = this.activeUserId;
+    let row;
+    if (uid !== null) {
+      row = this.db.prepare('SELECT value FROM ai_memory WHERE key=? AND user_id=?').get(key, uid);
+    } else {
+      row = this.db.prepare('SELECT value FROM ai_memory WHERE key=?').get(key);
+    }
     if (!row) return null;
     try { return JSON.parse(row.value); } catch { return row.value; }
   }
 
   getAllMemory() {
-    const rows = this.db.prepare('SELECT key, value, updated_at FROM ai_memory').all();
+    const uid = this.activeUserId;
+    if (uid === null) return {};
+    const rows = this.db.prepare('SELECT key, value, updated_at FROM ai_memory WHERE user_id=?').all(uid);
     const obj  = {};
     rows.forEach(r => {
       try { obj[r.key] = JSON.parse(r.value); } catch { obj[r.key] = r.value; }
@@ -1519,8 +1792,6 @@ class StudyFlowDB {
     const memory = this.getAllMemory();
     const prefs  = this.getUserPreferences();
 
-    // Live fetch active goals directly from GoalRepository — avoids stale ai_memory reads.
-    // getGoals() already computes paceStatus and daysRemaining via computeGoalInsights().
     const activeGoals = this.goalRepository.getGoals({ status: 'active' }).map(g => ({
       title:         g.title,
       progress:      g.progress_percentage,
@@ -1537,10 +1808,6 @@ class StudyFlowDB {
       energyPattern:         memory.energy_pattern              || null,
       dailyRoutine:          (memory.user_daily_routine && memory.user_daily_routine !== '__skipped__') ? memory.user_daily_routine : null,
       preferences:           prefs,
-      // Structured student profile, gathered once during onboarding
-      // (see onboarding-coach.js) — reused everywhere the AI generates
-      // anything, so it always knows the user's actual situation without
-      // being re-asked.
       studentProfile: {
         educationBranch:   memory.education_branch   || null,
         currentYear:       memory.current_year        || null,
@@ -1567,7 +1834,13 @@ class StudyFlowDB {
   // user_preferences (structured AI Memory)
 
   getUserPreferences() {
-    const row = this.db.prepare('SELECT * FROM user_preferences WHERE id=1').get();
+    const uid = this.activeUserId;
+    if (uid === null) return null;
+    let row = this.db.prepare('SELECT * FROM user_preferences WHERE user_id = ?').get(uid);
+    if (!row) {
+      this.db.prepare('INSERT OR IGNORE INTO user_preferences (user_id) VALUES (?)').run(uid);
+      row = this.db.prepare('SELECT * FROM user_preferences WHERE user_id = ?').get(uid);
+    }
     if (row && typeof row.completion_patterns === 'string' && row.completion_patterns) {
       try { row.completion_patterns = JSON.parse(row.completion_patterns); } catch { /* leave as string */ }
     }
@@ -1575,6 +1848,8 @@ class StudyFlowDB {
   }
 
   setUserPreferences(updates) {
+    const uid = this.activeUserId;
+    if (uid === null) return null;
     const allowed = ['preferred_study_time', 'energy_level', 'focus_duration',
                      'goal_type', 'most_productive_category', 'completion_patterns'];
     const fields  = Object.keys(updates).filter(k => allowed.includes(k));
@@ -1588,38 +1863,42 @@ class StudyFlowDB {
         : updates[k];
     });
 
-    return this.db.prepare(`UPDATE user_preferences SET ${setClause}, last_updated=datetime('now') WHERE id=1`).run(params);
+    this.getUserPreferences(); // ensure row exists
+    return this.db.prepare(`UPDATE user_preferences SET ${setClause}, last_updated=datetime('now') WHERE user_id=@uid`).run({ ...params, uid });
   }
 
   learnUserPreferences() {
+    const uid = this.activeUserId;
+    if (uid === null) return null;
+
     const hourRow = this.db.prepare(`
       SELECT hour_of_day, COUNT(*) as c FROM habit_logs
-      WHERE event IN ('completed','partial') AND logged_at >= datetime('now','-30 days')
+      WHERE event IN ('completed','partial') AND logged_at >= datetime('now','-30 days') AND user_id = ?
       GROUP BY hour_of_day ORDER BY c DESC LIMIT 1
-    `).get();
+    `).get(uid);
 
     const catRow = this.db.prepare(`
       SELECT category,
              SUM(CASE WHEN event='completed' THEN 1 ELSE 0 END) as completed,
              COUNT(*) as total
       FROM habit_logs
-      WHERE logged_at >= datetime('now','-30 days') AND category IS NOT NULL
+      WHERE logged_at >= datetime('now','-30 days') AND category IS NOT NULL AND user_id = ?
       GROUP BY category HAVING total >= 2
       ORDER BY (CAST(completed AS REAL)/total) DESC LIMIT 1
-    `).get();
+    `).get(uid);
 
     const focusRow = this.db.prepare(`
       SELECT AVG(duration_minutes) as avg_minutes FROM sessions
-      WHERE type IN ('focus','pomodoro') AND started_at >= datetime('now','-30 days')
-    `).get();
+      WHERE type IN ('focus','pomodoro') AND started_at >= datetime('now','-30 days') AND user_id = ?
+    `).get(uid);
 
     const patternRows = this.db.prepare(`
       SELECT category,
              SUM(CASE WHEN event='completed' THEN 1 ELSE 0 END) as completed,
              COUNT(*) as total
-      FROM habit_logs WHERE logged_at >= datetime('now','-30 days') AND category IS NOT NULL
+      FROM habit_logs WHERE logged_at >= datetime('now','-30 days') AND category IS NOT NULL AND user_id = ?
       GROUP BY category HAVING total >= 1
-    `).all();
+    `).all(uid);
 
     const completionPatterns = {};
     patternRows.forEach(r => {
@@ -1641,6 +1920,13 @@ class StudyFlowDB {
   // ═══════════════════════════════════════════════════════════════════════
 
   computeProductivityScores() {
+    const uid = this.activeUserId;
+    if (uid === null) {
+      return {
+        dailyScore: 0, weeklyScore: 0, focusScore: 0, consistencyScore: 0,
+        recommendedAction: 'Please sign in to track productivity.'
+      };
+    }
     const todayTasks    = this.getTodayTasks();
     const completedToday = todayTasks.filter(t => t.status === 'completed').length;
     const dailyScore    = todayTasks.length > 0
@@ -1650,9 +1936,9 @@ class StudyFlowDB {
       SELECT date(due_date) as d,
              COUNT(*) as total,
              SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as done
-      FROM tasks WHERE due_date >= date('now','-6 days') AND due_date <= date('now') AND status != 'deleted'
+      FROM tasks WHERE due_date >= date('now','-6 days') AND due_date <= date('now') AND status != 'deleted' AND user_id = ?
       GROUP BY date(due_date)
-    `).all();
+    `).all(uid);
     const weeklyScore = weekRows.length > 0
       ? Math.round(weekRows.reduce((sum, r) => sum + (r.total > 0 ? (r.done / r.total) : 0), 0) / weekRows.length * 100)
       : 0;
@@ -1663,13 +1949,18 @@ class StudyFlowDB {
     const streak          = this.getStreak();
     const consistencyScore = Math.min(100, Math.round((streak / 14) * 100));
 
-    this.db.prepare(`
-      INSERT INTO productivity_scores (date, daily_score, weekly_score, focus_score, consistency_score)
-      VALUES (date('now'),?,?,?,?)
-      ON CONFLICT(date) DO UPDATE SET
-        daily_score=excluded.daily_score, weekly_score=excluded.weekly_score,
-        focus_score=excluded.focus_score, consistency_score=excluded.consistency_score
-    `).run(dailyScore, weeklyScore, focusScore, consistencyScore);
+    const existing = this.db.prepare('SELECT 1 FROM productivity_scores WHERE date = date(\'now\') AND user_id = ?').get(uid);
+    if (existing) {
+      this.db.prepare(`
+        UPDATE productivity_scores SET daily_score=?, weekly_score=?, focus_score=?, consistency_score=?
+        WHERE date=date('now') AND user_id=?
+      `).run(dailyScore, weeklyScore, focusScore, consistencyScore, uid);
+    } else {
+      this.db.prepare(`
+        INSERT INTO productivity_scores (date, daily_score, weekly_score, focus_score, consistency_score, user_id)
+        VALUES (date('now'),?,?,?,?,?)
+      `).run(dailyScore, weeklyScore, focusScore, consistencyScore, uid);
+    }
 
     return {
       dailyScore, weeklyScore, focusScore, consistencyScore,
@@ -1755,17 +2046,20 @@ class StudyFlowDB {
   // ═══════════════════════════════════════════════════════════════════════
 
   detectBurnout() {
+    const uid = this.activeUserId;
+    if (uid === null) return { riskLevel: 'none', signals: [], recommendation: 'Please sign in.', suggestedMode: 'normal' };
+
     const signals   = [];
     let riskScore   = 0;
 
     const missedThisWeek = this.db.prepare(`
       SELECT SUM(CASE WHEN event='missed' THEN 1 ELSE 0 END) as missed, COUNT(*) as total
-      FROM habit_logs WHERE logged_at >= datetime('now','-7 days')
-    `).get();
+      FROM habit_logs WHERE logged_at >= datetime('now','-7 days') AND user_id = ?
+    `).get(uid);
     const missedLastWeek = this.db.prepare(`
       SELECT SUM(CASE WHEN event='missed' THEN 1 ELSE 0 END) as missed, COUNT(*) as total
-      FROM habit_logs WHERE logged_at >= datetime('now','-14 days') AND logged_at < datetime('now','-7 days')
-    `).get();
+      FROM habit_logs WHERE logged_at >= datetime('now','-14 days') AND logged_at < datetime('now','-7 days') AND user_id = ?
+    `).get(uid);
 
     const missRateThis = missedThisWeek.total > 0 ? missedThisWeek.missed / missedThisWeek.total : 0;
     const missRateLast = missedLastWeek.total > 0 ? missedLastWeek.missed / missedLastWeek.total : 0;
@@ -1780,8 +2074,8 @@ class StudyFlowDB {
       }
     }
 
-    const focusThisWeek = this.db.prepare(`SELECT COALESCE(SUM(duration_minutes),0) as minutes FROM sessions WHERE started_at >= datetime('now','-7 days')`).get();
-    const focusLastWeek = this.db.prepare(`SELECT COALESCE(SUM(duration_minutes),0) as minutes FROM sessions WHERE started_at >= datetime('now','-14 days') AND started_at < datetime('now','-7 days')`).get();
+    const focusThisWeek = this.db.prepare(`SELECT COALESCE(SUM(duration_minutes),0) as minutes FROM sessions WHERE started_at >= datetime('now','-7 days') AND user_id = ?`).get(uid);
+    const focusLastWeek = this.db.prepare(`SELECT COALESCE(SUM(duration_minutes),0) as minutes FROM sessions WHERE started_at >= datetime('now','-14 days') AND started_at < datetime('now','-7 days') AND user_id = ?`).get(uid);
 
     if (focusLastWeek.minutes >= 60) {
       const dropRatio = (focusLastWeek.minutes - focusThisWeek.minutes) / focusLastWeek.minutes;
@@ -1794,8 +2088,8 @@ class StudyFlowDB {
       }
     }
 
-    const scoreThisWeek = this.db.prepare(`SELECT AVG(daily_score) as avg_score, COUNT(*) as days FROM productivity_scores WHERE date >= date('now','-6 days')`).get();
-    const scoreLastWeek = this.db.prepare(`SELECT AVG(daily_score) as avg_score, COUNT(*) as days FROM productivity_scores WHERE date >= date('now','-13 days') AND date < date('now','-6 days')`).get();
+    const scoreThisWeek = this.db.prepare(`SELECT AVG(daily_score) as avg_score, COUNT(*) as days FROM productivity_scores WHERE date >= date('now','-6 days') AND user_id = ?`).get(uid);
+    const scoreLastWeek = this.db.prepare(`SELECT AVG(daily_score) as avg_score, COUNT(*) as days FROM productivity_scores WHERE date >= date('now','-13 days') AND date < date('now','-6 days') AND user_id = ?`).get(uid);
 
     if (scoreLastWeek.days >= 3 && scoreThisWeek.days >= 2 && scoreLastWeek.avg_score > 0) {
       const scoreDrop = (scoreLastWeek.avg_score - scoreThisWeek.avg_score) / scoreLastWeek.avg_score;
@@ -1827,10 +2121,18 @@ class StudyFlowDB {
   // ═══════════════════════════════════════════════════════════════════════
 
   getLearningAnalytics() {
+    const uid = this.activeUserId;
+    if (uid === null) {
+      return {
+        sampleSize: 0, strengths: [], weaknesses: [],
+        productiveDays: [], productiveHours: [], predictedSuccessRate: null,
+        message: 'Not enough data yet — keep using StudyFlow AI for a few days to unlock learning analytics.'
+      };
+    }
     const logs = this.db.prepare(`
       SELECT category, event, completion_percent, hour_of_day, day_of_week
-      FROM habit_logs WHERE logged_at >= datetime('now','-30 days')
-    `).all();
+      FROM habit_logs WHERE logged_at >= datetime('now','-30 days') AND user_id = ?
+    `).all(uid);
 
     if (logs.length === 0) {
       return {
@@ -1891,8 +2193,10 @@ class StudyFlowDB {
   }
 
   calculatePredictedSuccessRate({ overallRate }) {
-    const last7 = this.db.prepare(`SELECT event, completion_percent FROM habit_logs WHERE logged_at >= datetime('now','-7 days')`).all();
-    const prior7 = this.db.prepare(`SELECT event, completion_percent FROM habit_logs WHERE logged_at >= datetime('now','-14 days') AND logged_at < datetime('now','-7 days')`).all();
+    const uid = this.activeUserId;
+    if (uid === null) return 50;
+    const last7 = this.db.prepare(`SELECT event, completion_percent FROM habit_logs WHERE logged_at >= datetime('now','-7 days') AND user_id = ?`).all(uid);
+    const prior7 = this.db.prepare(`SELECT event, completion_percent FROM habit_logs WHERE logged_at >= datetime('now','-14 days') AND logged_at < datetime('now','-7 days') AND user_id = ?`).all(uid);
     const isSuccess = l => l.event==='completed'||(l.event==='partial'&&l.completion_percent>=50);
 
     let trendComponent = 0.5;
@@ -1905,10 +2209,10 @@ class StudyFlowDB {
     }
 
     let goalComponent = 0.5;
-    const activeGoals = this.db.prepare(`SELECT id FROM goals WHERE status='active'`).all();
+    const activeGoals = this.goalRepository.getGoals({ status: 'active' });
     if (activeGoals.length > 0) {
       const paceScores = activeGoals.map(g => {
-        const ins = this.goalRepository.computeGoalInsights(this.getGoal(g.id));
+        const ins = this.goalRepository.computeGoalInsights(g);
         if (ins.paceStatus === 'ahead')    return 1;
         if (ins.paceStatus === 'on_track') return 0.75;
         if (ins.paceStatus === 'behind')   return 0.35;
@@ -1934,29 +2238,33 @@ class StudyFlowDB {
   ];
 
   ensureDailyQuests() {
+    const uid = this.activeUserId;
+    if (uid === null) return;
     const date = today();
-    const existing = this.db.prepare('SELECT COUNT(*) as c FROM daily_quests WHERE date=?').get(date);
+    const existing = this.db.prepare('SELECT COUNT(*) as c FROM daily_quests WHERE date=? AND user_id=?').get(date, uid);
     if (existing.c > 0) return;
 
     const dayOfYear = Math.floor((new Date() - new Date(new Date().getFullYear(),0,0)) / 86400000);
     const templates = StudyFlowDB.QUEST_TEMPLATES;
     const count     = Math.min(3, templates.length);
-    const insert    = this.db.prepare(`INSERT OR IGNORE INTO daily_quests (date,quest_key,title,description,target,xp_reward,status) VALUES (?,?,?,?,?,?,'active')`);
+    const insert    = this.db.prepare(`INSERT OR IGNORE INTO daily_quests (date,quest_key,title,description,target,xp_reward,status,user_id) VALUES (?,?,?,?,?,?,'active',?)`);
 
     for (let i = 0; i < count; i++) {
       const tpl = templates[(dayOfYear + i) % templates.length];
-      insert.run(date, tpl.key, tpl.title, tpl.description, tpl.target, tpl.xp_reward);
+      insert.run(date, tpl.key, tpl.title, tpl.description, tpl.target, tpl.xp_reward, uid);
     }
   }
 
   refreshDailyQuestProgress() {
+    const uid = this.activeUserId;
+    if (uid === null) return [];
     this.ensureDailyQuests();
     const date       = today();
-    const quests     = this.db.prepare('SELECT * FROM daily_quests WHERE date=?').all(date);
+    const quests     = this.db.prepare('SELECT * FROM daily_quests WHERE date=? AND user_id=?').all(date, uid);
     const todayTasks = this.getTodayTasks();
     const completed  = todayTasks.filter(t => t.status === 'completed');
     const focusMins  = this.getTodayStudyMinutes();
-    const wellness   = this.getWellness();
+    const wellness   = this.getWellness() || {};
 
     const metricValues = {
       tasks_completed:        completed.length,
@@ -1966,7 +2274,7 @@ class StudyFlowDB {
       wellness_logged:        ((wellness.water_glasses > 0 ? 1 : 0) + (wellness.exercise_done ? 1 : 0)) >= 2 ? 1 : 0
     };
 
-    const update = this.db.prepare(`UPDATE daily_quests SET progress=@progress,status=@status,completed_at=@completed_at WHERE id=@id`);
+    const update = this.db.prepare(`UPDATE daily_quests SET progress=@progress,status=@status,completed_at=@completed_at WHERE id=@id AND user_id=@uid`);
     quests.forEach(q => {
       const tpl      = StudyFlowDB.QUEST_TEMPLATES.find(t => t.key === q.quest_key);
       if (!tpl) return;
@@ -1974,14 +2282,14 @@ class StudyFlowDB {
       const wasActive = q.status === 'active';
       const nowDone   = progress >= q.target;
       if (wasActive && nowDone) {
-        update.run({ id: q.id, progress, status: 'completed', completed_at: new Date().toISOString() });
+        update.run({ id: q.id, progress, status: 'completed', completed_at: new Date().toISOString(), uid });
         this.awardXP(q.xp_reward, `Daily Quest: ${q.title}`, 'Quest');
       } else if (wasActive) {
-        update.run({ id: q.id, progress, status: 'active', completed_at: null });
+        update.run({ id: q.id, progress, status: 'active', completed_at: null, uid });
       }
     });
 
-    return this.db.prepare('SELECT * FROM daily_quests WHERE date=? ORDER BY id ASC').all(date);
+    return this.db.prepare('SELECT * FROM daily_quests WHERE date=? AND user_id=? ORDER BY id ASC').all(date, uid);
   }
 
   getDailyQuests() {
@@ -2025,6 +2333,7 @@ class StudyFlowDB {
   }
 
   refreshGoalProgress(goalId) {
+    const uid = this.activeUserId;
     const goal = this.goalRepository.getGoal(goalId);
     if (!goal || goal.status === 'deleted') return null;
 
@@ -2044,11 +2353,12 @@ class StudyFlowDB {
     if (goalCategories.length > 0 && taskTotal > 0) {
       const expectedMinutes = tasks.reduce((s,t) => s + (t.estimated_minutes||30), 0);
       const placeholders    = goalCategories.map(() => '?').join(',');
+      const userClause      = uid !== null ? `AND user_id = ${uid}` : '';
       const sessionRow      = this.db.prepare(`
         SELECT COALESCE(SUM(duration_minutes),0) as total FROM sessions
-        WHERE category IN (${placeholders}) AND started_at >= (SELECT created_at FROM goals WHERE id=?)
+        WHERE category IN (${placeholders}) AND started_at >= (SELECT created_at FROM goals WHERE id=?) ${userClause}
       `).get(...goalCategories, goalId);
-      focusRatio = expectedMinutes > 0 ? Math.min(1, sessionRow.total / expectedMinutes) : 0;
+      focusRatio = expectedMinutes > 0 && sessionRow ? Math.min(1, sessionRow.total / expectedMinutes) : 0;
     }
 
     const expectedXP = tasks.reduce((s,t)=>s+(t.xp_reward||0),0) + quests.reduce((s,q)=>s+(q.xp_reward||0),0);
@@ -2069,7 +2379,7 @@ class StudyFlowDB {
   }
 
   refreshAllGoalProgress() {
-    return this.db.prepare(`SELECT id FROM goals WHERE status='active'`).all().map(g => this.refreshGoalProgress(g.id));
+    return this.goalRepository.getGoals({ status: 'active' }).map(g => this.refreshGoalProgress(g.id));
   }
 
   getGoalDashboard() {
@@ -2082,6 +2392,19 @@ class StudyFlowDB {
   // ═══════════════════════════════════════════════════════════════════════
 
   savePlan(date, availableHours, energyLevel, schedule) {
+    const uid = this.activeUserId;
+    if (uid !== null) {
+      const existing = this.db.prepare('SELECT 1 FROM planner_entries WHERE date = ? AND user_id = ?').get(date, uid);
+      if (existing) {
+        return this.db.prepare(`
+          UPDATE planner_entries SET available_hours = ?, energy_level = ?, schedule = ? WHERE date = ? AND user_id = ?
+        `).run(availableHours, energyLevel, JSON.stringify(schedule), date, uid);
+      }
+      return this.db.prepare(`
+        INSERT INTO planner_entries (date, available_hours, energy_level, schedule, user_id)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(date, availableHours, energyLevel, JSON.stringify(schedule), uid);
+    }
     return this.db.prepare(`
       INSERT OR REPLACE INTO planner_entries (date, available_hours, energy_level, schedule)
       VALUES (?, ?, ?, ?)
@@ -2089,9 +2412,13 @@ class StudyFlowDB {
   }
 
   getPlan(date) {
-    // ORDER BY id DESC: returns the most recently saved schedule for this date.
-    // Handles legacy duplicate rows that existed before the UNIQUE index migration.
-    const row = this.db.prepare('SELECT * FROM planner_entries WHERE date=? ORDER BY id DESC LIMIT 1').get(date);
+    const uid = this.activeUserId;
+    let row;
+    if (uid !== null) {
+      row = this.db.prepare('SELECT * FROM planner_entries WHERE date=? AND user_id=? ORDER BY id DESC LIMIT 1').get(date, uid);
+    } else {
+      row = this.db.prepare('SELECT * FROM planner_entries WHERE date=? ORDER BY id DESC LIMIT 1').get(date);
+    }
     if (row) { try { row.schedule = JSON.parse(row.schedule||'[]'); } catch { row.schedule = []; } }
     return row;
   }
@@ -2149,23 +2476,32 @@ class StudyFlowDB {
   // ═══════════════════════════════════════════════════════════════════════
 
   getTimeBlocksForDate(date) {
+    const uid = this.activeUserId;
+    if (uid !== null) {
+      return this.db.prepare('SELECT * FROM time_blocks WHERE date=? AND user_id=? ORDER BY start_time ASC').all(date, uid);
+    }
     return this.db.prepare('SELECT * FROM time_blocks WHERE date=? ORDER BY start_time ASC').all(date);
   }
 
   addTimeBlock({ date, startTime, endTime, title, category, blockType, taskId, isFixed }) {
+    const uid = this.activeUserId;
     const result = this.db.prepare(`
-      INSERT INTO time_blocks (date,start_time,end_time,title,category,block_type,task_id,is_fixed)
-      VALUES (?,?,?,?,?,?,?,?)
-    `).run(date, startTime, endTime, title, category||'', blockType||'study', taskId||null, isFixed?1:0);
+      INSERT INTO time_blocks (date,start_time,end_time,title,category,block_type,task_id,is_fixed,user_id)
+      VALUES (?,?,?,?,?,?,?,?,?)
+    `).run(date, startTime, endTime, title, category||'', blockType||'study', taskId||null, isFixed?1:0, uid);
     return this.db.prepare('SELECT * FROM time_blocks WHERE id=?').get(result.lastInsertRowid);
   }
 
   deleteTimeBlock(id) {
-    return this.db.prepare('DELETE FROM time_blocks WHERE id=?').run(id);
+    const uid = this.activeUserId;
+    if (uid === null) return null;
+    return this.db.prepare('DELETE FROM time_blocks WHERE id=? AND user_id=?').run(id, uid);
   }
 
   clearTimeBlocksForDate(date) {
-    return this.db.prepare('DELETE FROM time_blocks WHERE date=? AND is_fixed=0').run(date);
+    const uid = this.activeUserId;
+    if (uid === null) return null;
+    return this.db.prepare('DELETE FROM time_blocks WHERE date=? AND is_fixed=0 AND user_id=?').run(date, uid);
   }
 
   getFreeSlots(date, dayStartHour = 8, dayEndHour = 22) {
@@ -2198,22 +2534,35 @@ class StudyFlowDB {
   // ═══════════════════════════════════════════════════════════════════════
 
   addSemester({ name, startDate, endDate }) {
-    const result = this.db.prepare('INSERT INTO semesters (name,start_date,end_date) VALUES (?,?,?)').run(name, startDate||null, endDate||null);
+    const uid = this.activeUserId;
+    if (uid === null) return null;
+    const result = this.db.prepare('INSERT INTO semesters (name,start_date,end_date,user_id) VALUES (?,?,?,?)').run(name, startDate||null, endDate||null, uid);
     return this.getSemester(result.lastInsertRowid);
   }
 
   getSemester(id) {
-    const semester = this.db.prepare('SELECT * FROM semesters WHERE id=?').get(id);
+    const uid = this.activeUserId;
+    if (uid === null) return null;
+    const semester = this.db.prepare('SELECT * FROM semesters WHERE id=? AND user_id=?').get(id, uid);
     if (!semester) return null;
     semester.subjects = this.db.prepare('SELECT * FROM semester_subjects WHERE semester_id=? ORDER BY exam_date ASC').all(id);
     return semester;
   }
 
   getAllSemesters() {
-    return this.db.prepare(`SELECT * FROM semesters WHERE status!='deleted' ORDER BY start_date DESC`).all().map(s => this.getSemester(s.id));
+    const uid = this.activeUserId;
+    if (uid === null) return [];
+    return this.db.prepare(`SELECT * FROM semesters WHERE status!='deleted' AND user_id=? ORDER BY start_date DESC`).all(uid).map(s => this.getSemester(s.id)).filter(Boolean);
   }
 
   addSubjectsToSemester(semesterId, subjects) {
+    const uid = this.activeUserId;
+    if (uid === null) return null;
+
+    // Verify semester belongs to uid
+    const sem = this.db.prepare('SELECT id FROM semesters WHERE id=? AND user_id=?').get(semesterId, uid);
+    if (!sem) return null;
+
     const insert     = this.db.prepare('INSERT INTO semester_subjects (semester_id,subject_name,exam_date,credits,priority) VALUES (?,?,?,?,?)');
     const insertMany = this.db.transaction(items => {
       items.forEach(s => insert.run(semesterId, s.subject_name, s.exam_date||null, s.credits||3, s.priority||'medium'));
@@ -2223,8 +2572,15 @@ class StudyFlowDB {
   }
 
   deleteSemester(id) {
+    const uid = this.activeUserId;
+    if (uid === null) return null;
+
+    // Verify ownership
+    const sem = this.db.prepare('SELECT id FROM semesters WHERE id=? AND user_id=?').get(id, uid);
+    if (!sem) return null;
+
     this.db.prepare('DELETE FROM semester_subjects WHERE semester_id=?').run(id);
-    this.db.prepare(`UPDATE semesters SET status='deleted' WHERE id=?`).run(id);
+    return this.db.prepare(`UPDATE semesters SET status='deleted' WHERE id=? AND user_id=?`).run(id, uid);
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -2232,15 +2588,21 @@ class StudyFlowDB {
   // ═══════════════════════════════════════════════════════════════════════
 
   saveCoachMessage(role, content) {
-    return this.db.prepare('INSERT INTO coach_messages (role,content) VALUES (?,?)').run(role, content);
+    const uid = this.activeUserId;
+    if (uid === null) return null;
+    return this.db.prepare('INSERT INTO coach_messages (role,content,user_id) VALUES (?,?,?)').run(role, content, uid);
   }
 
   getCoachHistory(limit = 20) {
-    return this.db.prepare('SELECT * FROM coach_messages ORDER BY created_at DESC LIMIT ?').all(limit).reverse();
+    const uid = this.activeUserId;
+    if (uid === null) return [];
+    return this.db.prepare('SELECT * FROM coach_messages WHERE user_id=? ORDER BY created_at DESC LIMIT ?').all(uid, limit).reverse();
   }
 
   clearCoachHistory() {
-    return this.db.prepare('DELETE FROM coach_messages').run();
+    const uid = this.activeUserId;
+    if (uid === null) return null;
+    return this.db.prepare('DELETE FROM coach_messages WHERE user_id=?').run(uid);
   }
 
   getCoachContext() {
@@ -2274,29 +2636,36 @@ class StudyFlowDB {
   // ═══════════════════════════════════════════════════════════════════════
 
   getSavedSessions() {
-    return this.db.prepare('SELECT * FROM saved_sessions ORDER BY created_at DESC').all().map(s => {
+    const uid = this.activeUserId;
+    if (uid === null) return [];
+    return this.db.prepare('SELECT * FROM saved_sessions WHERE user_id=? ORDER BY created_at DESC').all(uid).map(s => {
       s.segments = JSON.parse(s.segments || '[]');
       return s;
     });
   }
 
   addSavedSession(session) {
+    const uid = this.activeUserId;
+    if (uid === null) return null;
     const insert = this.db.prepare(`
-      INSERT INTO saved_sessions (title, session_type, duration_minutes, source_prompt, segments)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO saved_sessions (title, session_type, duration_minutes, source_prompt, segments, user_id)
+      VALUES (?, ?, ?, ?, ?, ?)
     `);
     const info = insert.run(
       session.title,
       session.session_type,
       session.duration_minutes,
       session.source_prompt,
-      JSON.stringify(session.segments)
+      JSON.stringify(session.segments),
+      uid
     );
     return info.lastInsertRowid;
   }
 
   deleteSavedSession(id) {
-    return this.db.prepare('DELETE FROM saved_sessions WHERE id = ?').run(id);
+    const uid = this.activeUserId;
+    if (uid === null) return null;
+    return this.db.prepare('DELETE FROM saved_sessions WHERE id = ? AND user_id = ?').run(id, uid);
   }
 
   // ═══════════════════════════════════════════════════════════════════════

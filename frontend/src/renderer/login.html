@@ -3,8 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy"
-    content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;">
+  <!-- Content-Security-Policy is injected dynamically by main.js (_attachCsp)
+       using STUDYFLOW_BACKEND_URL. Do NOT add a static CSP meta tag here —
+       it would be overwritten by the main-process header and could
+       accidentally hardcode localhost for a production build. -->
   <title>StudyFlow AI — Sign In</title>
   <link rel="stylesheet" href="styles/main.css">
   <style>
@@ -131,6 +133,15 @@
     </div>
   </div>
 
+  <script src="core/config.js"></script>
+  <script src="core/logger.js"></script>
+  <script src="core/event-bus.js"></script>
+  <script src="core/error-service.js"></script>
+  <script src="api/api-client.js"></script>
+  <script src="services/session-manager.js"></script>
+  <script src="api/auth-api.js"></script>
+  <script src="services/auth-service.js"></script>
+  <script src="gateways/auth-gateway.js"></script>
   <script src="login.js"></script>
 </body>
 </html>

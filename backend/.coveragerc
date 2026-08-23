@@ -1,0 +1,12 @@
+[run]
+concurrency = greenlet,thread
+source =
+    app/api/auth
+    app/main.py
+
+[report]
+show_missing = true
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    if __name__ == .__main__

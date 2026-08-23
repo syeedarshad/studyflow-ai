@@ -19,8 +19,10 @@ from core.config import get_settings
 from database.base import Base
 
 # Import all models so their metadata is registered for autogenerate.
-# Add new model modules here as each phase is implemented.
 from app.api.auth import models as auth_models  # noqa: F401
+from app.api.profile import models as profile_models  # noqa: F401
+from app.api.providers import models as provider_models  # noqa: F401
+from app.api.tasks import models as task_models  # noqa: F401
 
 config = context.config
 settings = get_settings()

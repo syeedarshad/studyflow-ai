@@ -47,7 +47,7 @@ const CATEGORIES = [
 const ACTION_MAP = {
   showAddTaskModal:        () => showAddTaskModal(),
   runAIPrompt:             () => runAIPrompt(),
-  navigateTo:              (page) => navigateTo(page),
+  navigateTo:              (page, section) => navigateTo(page, section),
   dismissBurnoutBanner:    () => { const el = document.getElementById('burnout-banner-slot'); if (el) el.innerHTML = ''; },
   applyBurnoutMode:        (mode) => applyBurnoutMode(mode),
   resolveOverdueTask:      (taskId, pct) => resolveOverdueTask(taskId, pct),
@@ -116,7 +116,6 @@ const ACTION_MAP = {
   toggleProfileDropdown:   () => toggleProfileDropdown(),
   showHelp:                () => showHelp(),
   regenerateScheduleFromSettings: () => regenerateScheduleFromSettings(),
-  testProviderKey:         (provider) => testProviderKey(provider),
   saveRoutineSetting:      () => saveRoutineSetting(),
   showAddNoteModal:        () => showAddNoteModal(),
   searchNotes:             (query) => searchNotes(query),
@@ -127,12 +126,14 @@ const ACTION_MAP = {
   updateWellness:          (field, value) => updateWellness(field, value),
   setTheme:                (theme) => setTheme(theme),
   setPlannerTimeNow:       () => setPlannerTimeNow(),
+  showEditProfileModal:    () => showEditProfileModal(),
+  saveProfile:             () => saveProfile(),
 };
 
 function collectActionArgs(el, action) {
   const d = el.dataset;
   switch (action) {
-    case 'navigateTo': return [d.page];
+    case 'navigateTo': return [d.page, d.section || null];
     case 'applyBurnoutMode': return [d.mode];
     case 'resolveOverdueTask': return [Number(d.taskId), Number(d.pct)];
     case 'regeneratePlan': return [decodeURIComponent(d.prompt || '')];
@@ -186,7 +187,6 @@ function collectActionArgs(el, action) {
       return [d.field, val];
     }
     case 'setTheme': return [d.theme];
-    case 'testProviderKey': return [d.provider];
     case 'searchNotes': return [el.value];
     default: return [];
   }
@@ -228,6 +228,42 @@ function bindEventHandlers() {
 document.addEventListener('DOMContentLoaded', async () => {
   bindEventHandlers();
   restoreSidebarState();
+
+  // ── SyncManager offline detection & pending sync initialization ──────
+  if (window.SyncManager) {
+    window.SyncManager.init().catch(err => console.warn('[App] SyncManager init error:', err));
+  }
+
+  // ── Phase 2: Validate backend session on every app launch ──────────────
+  // If a backend session token is stored, validate it now. If it is invalid
+  // (revoked, expired, or backend unreachable), navigate to login.
+  // This is a silent check — the user never sees a flash of the dashboard.
+  if (window.AuthGateway) {
+    const sessionRes = await window.AuthGateway.restoreSession();
+    if (!sessionRes.success) {
+      // No valid session token or invalid session — navigate directly to login
+      await window.studyflow.navigateToLogin();
+      return;
+    }
+
+    if (sessionRes.success && sessionRes.user) {
+      App.currentUser = sessionRes.user;
+      if (window.SessionManager) window.SessionManager.setUser(sessionRes.user);
+      if (window.studyflow?.setActiveUser) {
+        await window.studyflow.setActiveUser(sessionRes.user);
+      }
+    }
+
+    // Phase 3 — Migrate local SQLite tasks to PostgreSQL once per user
+    const currentUserId = sessionRes?.user?.id;
+    if (currentUserId && window.TaskService) {
+      window.TaskService.migrateLocalTasksOnce(currentUserId).catch(err => {
+        console.warn('[App] Local task migration warning:', err);
+      });
+    }
+  }
+  // ── End Phase 2 session check ───────────────────────────────────────────
+
   App.settings = (await window.studyflow.db('getAllSettings')).data || {};
   applyTheme(App.settings.theme || 'dark');
   await updateSidebarXP();
@@ -248,8 +284,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 });
 
+
 // ─── Navigation ───────────────────────────────────────────────────────────────
-async function navigateTo(page) {
+async function navigateTo(page, section = null) {
   App.currentPage = page;
 
   // Feature 5 — deactivate Focus Mode overlay on page change
@@ -285,7 +322,26 @@ async function navigateTo(page) {
     profile:      renderProfile
   };
 
-  if (pageRenderers[page]) await pageRenderers[page](main);
+  if (pageRenderers[page]) {
+    await pageRenderers[page](main);
+    if (section) {
+      setTimeout(() => {
+        const target = document.getElementById(`settings-section-${section}`) ||
+                       document.getElementById(`profile-section-${section}`) ||
+                       document.getElementById(section);
+        if (target) {
+          target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          target.style.transition = 'box-shadow 0.3s ease, border-color 0.3s ease';
+          target.style.borderColor = 'var(--accent)';
+          target.style.boxShadow = '0 0 16px var(--glow)';
+          setTimeout(() => {
+            target.style.borderColor = '';
+            target.style.boxShadow = '';
+          }, 1800);
+        }
+      }, 50);
+    }
+  }
 }
 
 // ─── Sidebar XP + Title Badge ─────────────────────────────────────────────────
@@ -310,8 +366,9 @@ async function updateSidebarXP() {
   App.levelInfo = { level, totalXP, xpForLevel, xpForNext, progress };
 
   try {
+    const activeUser = App.currentUser || window.SessionManager?.getUser?.();
     const settingsRes = await window.studyflow.db('getAllSettings');
-    const name = (settingsRes.data && settingsRes.data.user_name) || 'Student';
+    const name = activeUser?.full_name || activeUser?.name || (settingsRes.data && settingsRes.data.user_name) || 'Student';
     const avatarEl = document.getElementById('sidebar-avatar');
     const nameEl   = document.getElementById('sidebar-avatar-name');
     if (avatarEl) avatarEl.textContent = name.trim().charAt(0).toUpperCase() || 'S';
@@ -366,7 +423,7 @@ async function regenerateScheduleFromSettings() {
 
 async function logout() {
   if (!confirm('Sign out of StudyFlow AI?')) return;
-  await window.studyflow.authLogout();
+  await window.AuthGateway.logout();
 }
 
 function toggleProfileDropdown() {
@@ -407,37 +464,6 @@ function showHelp() {
   `);
 }
 
-async function testProviderKey(provider) {
-  const inputId  = provider === 'gemini' ? 'setting-gemini' : 'setting-groq';
-  const btnId    = `test-key-${provider}-btn`;
-  const statusId = `test-key-${provider}-status`;
-
-  const input  = document.getElementById(inputId);
-  const btn    = document.getElementById(btnId);
-  const status = document.getElementById(statusId);
-  const key    = input?.value.trim();
-
-  if (!key) {
-    if (status) { status.textContent = 'Enter a key first.'; status.style.color = 'var(--text-3)'; }
-    return;
-  }
-
-  if (btn) { btn.disabled = true; btn.textContent = 'Testing...'; }
-  if (status) { status.textContent = '⏳ Checking...'; status.style.color = 'var(--text-3)'; }
-
-  try {
-    const res = await window.studyflow.testProviderKey(provider, key);
-    if (status) {
-      status.textContent = (res.success ? '✅ ' : '❌ ') + res.message;
-      status.style.color = res.success ? 'var(--success)' : 'var(--danger)';
-    }
-  } catch (err) {
-    if (status) { status.textContent = '❌ Could not run the test — try again.'; status.style.color = 'var(--danger)'; }
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = 'Test Key'; }
-  }
-}
-
 function toggleSidebar() {
   const sidebar = document.getElementById('sidebar');
   const toggle  = document.getElementById('sidebar-toggle');
@@ -459,7 +485,9 @@ function restoreSidebarState() {
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 function applyTheme(theme) {
-  document.documentElement.setAttribute('data-theme', theme || 'dark');
+  const validThemes = ['dark', 'light'];
+  const safeTheme = validThemes.includes(theme) ? theme : 'dark';
+  document.documentElement.setAttribute('data-theme', safeTheme);
 }
 
 // ─── Provider label helper (Offline Mode badge) ───────────────────────────────
@@ -722,8 +750,8 @@ function closeModal() {
 // PAGE: DASHBOARD
 // ═══════════════════════════════════════════════════════════
 async function renderDashboard(container) {
-  const [tasksRes, xpRes, streakRes, settingsRes, goalsRes, examsRes] = await Promise.all([
-    window.studyflow.db('getTodayTasks'),
+  const [todayTasks, xpRes, streakRes, settingsRes, goalsRes, examsRes] = await Promise.all([
+    window.TaskService ? window.TaskService.getTodayTasks() : window.studyflow.db('getTodayTasks').then(r => r.data || []),
     window.studyflow.db('getTodayXP'),
     window.studyflow.db('getStreak'),
     window.studyflow.db('getAllSettings'),
@@ -731,7 +759,6 @@ async function renderDashboard(container) {
     window.studyflow.examGetAll().catch(() => ({ success: false }))
   ]);
 
-  const todayTasks = tasksRes.data  || [];
   const todayXP    = xpRes.data     || 0;
   const streak     = streakRes.data || 0;
   const settings   = settingsRes.data || {};
@@ -757,7 +784,9 @@ async function renderDashboard(container) {
     dreamCompany = Array.isArray(companies) && companies.length ? companies[0] : null;
   } catch (err) { /* non-critical */ }
 
-  const greetingHeader = getGreetingHeader(settings.user_name || 'Student');
+  const activeUser = App.currentUser || window.SessionManager?.getUser?.();
+  const userName = activeUser?.full_name || activeUser?.name || settings.user_name || 'Student';
+  const greetingHeader = getGreetingHeader(userName);
   const coachingLine   = getCoachingLine({ burnoutRisk, exams, pendingCount: pending.length, goals, streak, todayXP, careerGoal, dreamCompany });
 
   container.innerHTML = `
@@ -1217,12 +1246,25 @@ function renderTaskItem(task) {
 
 async function toggleTask(id, currentStatus) {
   if (currentStatus === 'completed') {
-    await window.studyflow.db('updateTask', id, { status: 'pending', completed_at: null });
+    if (window.TaskService) {
+      await window.TaskService.updateTask(id, { status: 'pending', completed_at: null });
+    } else {
+      await window.studyflow.db('updateTask', id, { status: 'pending', completed_at: null });
+    }
     toast('Task marked as pending', 'info');
   } else {
-    await window.studyflow.db('completeTask', id);
-    toast('Task completed! XP awarded 🎉', 'success');
-    window.studyflow.notify('Task Complete!', 'Great work! Keep it up.');
+    if (window.TaskService) {
+      const res = await window.TaskService.completeTask(id);
+      toast('Task completed! XP awarded 🎉', 'success');
+      window.studyflow.notify('Task Complete!', 'Great work! Keep it up.');
+      if (res.xp_awarded) {
+        await window.studyflow.db('awardXP', res.xp_awarded, 'Completed task', 'Revision').catch(() => {});
+      }
+    } else {
+      await window.studyflow.db('completeTask', id);
+      toast('Task completed! XP awarded 🎉', 'success');
+      window.studyflow.notify('Task Complete!', 'Great work! Keep it up.');
+    }
     await updateSidebarXP();
     if (window.OnboardingCoach) window.OnboardingCoach.maybeEncourage();
   }
@@ -1286,15 +1328,44 @@ async function saveNewTask() {
 
   if (!title) { toast('Enter a task title', 'error'); return; }
 
-  await window.studyflow.db('addTask', { title, category, priority, due_date, notes, estimated_minutes, reminder_time:'', is_recurring:0, recurrence_pattern:null });
+  const taskPayload = {
+    title,
+    category,
+    priority,
+    due_date: due_date || null,
+    notes,
+    estimated_minutes,
+    reminder_time: '',
+    is_recurring: false,
+    recurrence_pattern: null
+  };
+
+  if (window.TaskService) {
+    const res = await window.TaskService.createTask(taskPayload);
+    if (!res.success) {
+      toast(res.error || 'Failed to add task', 'error');
+      return;
+    }
+  } else {
+    await window.studyflow.db('addTask', taskPayload);
+  }
+
   toast('Task added!', 'success');
   closeModal();
   await navigateTo(App.currentPage);
 }
 
 async function showEditTaskModal(id) {
-  const res  = await window.studyflow.db('getTasks', {});
-  const task = (res.data || []).find(t => t.id === id);
+  let task = _cachedAllTasks.find(t => t.id === id);
+  if (!task) {
+    if (window.TaskService) {
+      const all = await window.TaskService.getTasks();
+      task = all.find(t => t.id === id);
+    } else {
+      const res = await window.studyflow.db('getTasks', {});
+      task = (res.data || []).find(t => t.id === id);
+    }
+  }
   if (!task) return;
 
   showModal('✏️ Edit Task', `
@@ -1341,14 +1412,25 @@ async function showEditTaskModal(id) {
 }
 
 async function saveEditTask(id) {
-  await window.studyflow.db('updateTask', id, {
+  const updates = {
     title:             document.getElementById('edit-task-title')?.value.trim(),
     category:          document.getElementById('edit-task-category')?.value,
     priority:          document.getElementById('edit-task-priority')?.value,
-    due_date:          document.getElementById('edit-task-due')?.value,
+    due_date:          document.getElementById('edit-task-due')?.value || null,
     estimated_minutes: parseInt(document.getElementById('edit-task-minutes')?.value)||30,
     notes:             document.getElementById('edit-task-notes')?.value.trim()
-  });
+  };
+
+  if (window.TaskService) {
+    const res = await window.TaskService.updateTask(id, updates);
+    if (!res.success) {
+      toast(res.error || 'Failed to update task', 'error');
+      return;
+    }
+  } else {
+    await window.studyflow.db('updateTask', id, updates);
+  }
+
   toast('Task updated!', 'success');
   closeModal();
   await navigateTo(App.currentPage);
@@ -1356,7 +1438,11 @@ async function saveEditTask(id) {
 
 async function deleteTask(id) {
   if (!confirm('Delete this task?')) return;
-  await window.studyflow.db('deleteTask', id);
+  if (window.TaskService) {
+    await window.TaskService.deleteTask(id);
+  } else {
+    await window.studyflow.db('deleteTask', id);
+  }
   toast('Task deleted', 'info');
   closeModal();
   await navigateTo(App.currentPage);
@@ -1368,13 +1454,23 @@ async function deleteTask(id) {
 let _cachedAllTasks = [];
 
 async function renderTasks(container) {
-  const [allRes, todayRes] = await Promise.all([
-    window.studyflow.db('getTasks', {}),
-    window.studyflow.db('getTodayTasks')
-  ]);
+  let allTasks = [];
+  let todayTasks = [];
 
-  const allTasks   = allRes.data   || [];
-  const todayTasks = todayRes.data || [];
+  if (window.TaskService) {
+    [allTasks, todayTasks] = await Promise.all([
+      window.TaskService.getTasks(),
+      window.TaskService.getTodayTasks()
+    ]);
+  } else {
+    const [allRes, todayRes] = await Promise.all([
+      window.studyflow.db('getTasks', {}),
+      window.studyflow.db('getTodayTasks')
+    ]);
+    allTasks = allRes.data || [];
+    todayTasks = todayRes.data || [];
+  }
+
   const pending    = todayTasks.filter(t => t.status === 'pending');
   const completed  = todayTasks.filter(t => t.status === 'completed');
   const overdue    = allTasks.filter(t => t.status === 'pending' && t.due_date && new Date(t.due_date) < new Date(new Date().setHours(0,0,0,0)));
@@ -1441,8 +1537,10 @@ function filterTasks(filter) {
 // PAGE: FOCUS (with AI Focus Mode)
 // ═══════════════════════════════════════════════════════════
 async function renderFocus(container) {
-  const todayTasksRes = await window.studyflow.db('getTodayTasks');
-  const todayTasks    = (todayTasksRes.data || []).filter(t => t.status === 'pending');
+  const todayTasks = (window.TaskService
+    ? (await window.TaskService.getTodayTasks())
+    : (await window.studyflow.db('getTodayTasks')).data || []
+  ).filter(t => t.status === 'pending');
   const p = { high: 3, medium: 2, low: 1 };
   const topTask = todayTasks.sort((a,b) => (p[b.priority]||0)-(p[a.priority]||0))[0];
 
@@ -4055,9 +4153,10 @@ function buildActivityHeatmap(streakRows) {
 // PAGE: PROFILE
 // ═══════════════════════════════════════════════════════════
 async function renderProfile(container) {
-  const [settingsRes, userRes, categoryRes, streakRes, historyRes, completedRes] = await Promise.all([
+  const [settingsRes, profileRes, userRes, categoryRes, streakRes, historyRes, completedRes] = await Promise.all([
     window.studyflow.db('getAllSettings'),
-    window.studyflow.authGetCurrentUser().catch(() => ({ success: false })),
+    window.ProfileService ? window.ProfileService.getProfile().catch(() => null) : null,
+    window.AuthGateway.getCurrentUser().catch(() => ({ success: false })),
     window.studyflow.db('getCategoryStats'),
     window.studyflow.db('getStreak'),
     window.studyflow.db('getStreakHistory', 365),
@@ -4065,9 +4164,15 @@ async function renderProfile(container) {
   ]);
 
   const settings = settingsRes.data || {};
-  const name     = settings.user_name || (userRes.success && userRes.user.full_name) || 'Student';
-  const email    = userRes.success ? userRes.user.email : null;
-  const joinedAt = userRes.success ? userRes.user.created_at : null;
+  const profile  = profileRes || {};
+  const user     = userRes.success ? userRes.user : {};
+
+  const name     = profile.display_name || user.full_name || settings.user_name || 'Student';
+  const email    = user.email || null;
+  const bio      = profile.bio || '';
+  const avatarUrl = profile.avatar_url || '';
+  const studyPreferences = profile.study_preferences || {};
+  const joinedAt = profile.created_at || user.created_at || null;
   const streak   = streakRes.data || 0;
   const categories = categoryRes.data || [];
   const li = App.levelInfo || { level: 1, totalXP: 0 };
@@ -4080,6 +4185,19 @@ async function renderProfile(container) {
     .sort((a, b) => new Date(b.completed_at) - new Date(a.completed_at))
     .slice(0, 6);
 
+  // Cache loaded profile in App state for edit modal
+  App.currentProfile = {
+    display_name: name,
+    bio: bio,
+    avatar_url: avatarUrl,
+    timezone: profile.timezone || 'UTC',
+    country: profile.country || '',
+    language: profile.language || 'en',
+    study_preferences: studyPreferences,
+  };
+
+  const hasPrefs = Object.keys(studyPreferences).length > 0;
+
   container.innerHTML = `
     <div class="page-header">
       <div>
@@ -4091,14 +4209,33 @@ async function renderProfile(container) {
     <div class="grid-main" style="gap:20px">
       <!-- Left: identity card -->
       <div class="card" style="text-align:center">
-        <div class="sidebar-avatar" style="width:72px;height:72px;font-size:28px;margin:0 auto 14px">
-          ${escapeHTML(name).charAt(0).toUpperCase() || 'S'}
-        </div>
+        ${avatarUrl ? `
+          <img src="${escapeHTML(avatarUrl)}" alt="Avatar" style="width:72px;height:72px;border-radius:50%;object-fit:cover;margin:0 auto 14px;border:2px solid var(--border)">
+        ` : `
+          <div class="sidebar-avatar" style="width:72px;height:72px;font-size:28px;margin:0 auto 14px">
+            ${escapeHTML(name).charAt(0).toUpperCase() || 'S'}
+          </div>
+        `}
         <div style="font-size:17px;font-weight:800;color:var(--text)">${escapeHTML(name)}</div>
         ${email ? `<div style="font-size:12px;color:var(--text-3);margin-top:2px">${escapeHTML(email)}</div>` : ''}
+        ${bio ? `<div style="font-size:12px;color:var(--text-2);margin-top:6px;font-style:italic">"${escapeHTML(bio)}"</div>` : ''}
         <div style="font-size:11px;color:var(--text-3);margin-top:8px">Rank: Level ${li.level} · ${li.totalXP} XP</div>
         ${joinedAt ? `<div style="font-size:10.5px;color:var(--text-3);margin-top:4px">Joined ${new Date(joinedAt).toLocaleDateString()}</div>` : ''}
-        <button class="btn btn-ghost btn-sm" data-action="logout" style="margin-top:14px">🚪 Sign Out</button>
+        
+        <div style="display:flex;justify-content:center;gap:8px;margin-top:14px">
+          <button class="btn btn-primary btn-sm" data-action="showEditProfileModal">✏️ Edit Profile</button>
+          <button class="btn btn-ghost btn-sm" data-action="logout">🚪 Sign Out</button>
+        </div>
+
+        ${hasPrefs ? `
+          <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border);text-align:left">
+            <div class="section-label" style="margin-bottom:8px">📚 Study Preferences</div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px">
+              ${studyPreferences.pace ? `<span class="badge" style="background:var(--surface-2);font-size:10.5px">Pace: ${escapeHTML(studyPreferences.pace)}</span>` : ''}
+              ${studyPreferences.focus_style ? `<span class="badge" style="background:var(--surface-2);font-size:10.5px">Focus: ${escapeHTML(studyPreferences.focus_style)}</span>` : ''}
+            </div>
+          </div>
+        ` : ''}
 
         <div style="display:flex;justify-content:center;gap:20px;margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
           <div>
@@ -4156,25 +4293,122 @@ async function renderProfile(container) {
   `;
 }
 
+function showEditProfileModal() {
+  const p = App.currentProfile || {};
+  const prefs = p.study_preferences || {};
+  showModal('✏️ Edit Profile', `
+    <div class="form-group">
+      <label class="form-label">Display Name</label>
+      <input class="form-input" id="edit-profile-name" value="${escapeHTML(p.display_name || '')}" placeholder="Your display name">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Bio</label>
+      <textarea class="form-input" id="edit-profile-bio" rows="2" style="width:100%;resize:vertical;font-family:inherit" placeholder="A short bio about your study goals">${escapeHTML(p.bio || '')}</textarea>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Avatar URL</label>
+      <input class="form-input" id="edit-profile-avatar" value="${escapeHTML(p.avatar_url || '')}" placeholder="https://example.com/avatar.png">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Preferred Study Pace</label>
+      <select class="form-input" id="edit-profile-pace">
+        <option value="moderate" ${(prefs.pace || 'moderate') === 'moderate' ? 'selected' : ''}>Moderate (Balanced)</option>
+        <option value="intense" ${prefs.pace === 'intense' ? 'selected' : ''}>Intense (Fast-paced)</option>
+        <option value="relaxed" ${prefs.pace === 'relaxed' ? 'selected' : ''}>Relaxed (Gentle)</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Daily Focus Style</label>
+      <input class="form-input" id="edit-profile-focus-style" value="${escapeHTML(prefs.focus_style || 'Deep Work')}" placeholder="e.g. Deep Work, Pomodoro, Exam Sprints">
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px">
+      <button class="btn btn-ghost" data-action="closeModal">Cancel</button>
+      <button class="btn btn-primary" data-action="saveProfile">Save Profile</button>
+    </div>
+  `);
+}
+
+async function saveProfile() {
+  const displayName = document.getElementById('edit-profile-name')?.value.trim() || 'Student';
+  const bio = document.getElementById('edit-profile-bio')?.value.trim() || '';
+  const avatarUrl = document.getElementById('edit-profile-avatar')?.value.trim() || null;
+  const pace = document.getElementById('edit-profile-pace')?.value || 'moderate';
+  const focusStyle = document.getElementById('edit-profile-focus-style')?.value.trim() || 'Deep Work';
+
+  const studyPreferences = {
+    ...(App.currentProfile?.study_preferences || {}),
+    pace,
+    focus_style: focusStyle,
+  };
+
+  try {
+    // 1. Update backend profile via ProfileService
+    if (window.ProfileService) {
+      await window.ProfileService.updateProfile({
+        display_name: displayName,
+        bio: bio,
+      });
+      await window.ProfileService.updatePreferences(studyPreferences);
+      if (avatarUrl !== undefined) {
+        if (avatarUrl) {
+          await window.ProfileService.updateAvatar(avatarUrl);
+        } else {
+          await window.ProfileService.deleteAvatar();
+        }
+      }
+    }
+
+    // 2. Update local SQLite setting for offline fallback and sidebar
+    await window.studyflow.db('setSetting', 'user_name', displayName);
+    App.settings.user_name = displayName;
+
+    closeModal();
+    toast('Profile updated successfully!', 'success');
+    await updateSidebarXP();
+    await renderProfile(document.getElementById('main-content'));
+  } catch (err) {
+    console.error('[App] Failed to save profile:', err);
+    toast('Failed to save profile online. Saved locally for sync.', 'warning');
+    closeModal();
+    await renderProfile(document.getElementById('main-content'));
+  }
+}
+
 // ═══════════════════════════════════════════════════════════
 // PAGE: SETTINGS
 // ═══════════════════════════════════════════════════════════
 async function renderSettings(container) {
-  const [res, memoryRes] = await Promise.all([
+  const [res, memoryRes, providersRes, profileRes, usageRes] = await Promise.all([
     window.studyflow.db('getAllSettings'),
-    window.studyflow.memoryGetAll()
+    window.studyflow.memoryGetAll(),
+    window.providerApi ? window.providerApi.getProviderStatus().catch(() => ({ success: true, data: { providers: [] } })) : { success: true, data: { providers: [] } },
+    window.ProfileService ? window.ProfileService.getProfile().catch(() => null) : null,
+    window.usageApi ? window.usageApi.getUsage().catch(() => ({ success: true, data: { used: 0, daily_limit: 50, remaining: 50 } })) : { success: true, data: { used: 0, daily_limit: 50, remaining: 50 } }
   ]);
   const settings = res.data || {};
   const memory   = memoryRes.data || {};
   const routine  = memory.user_daily_routine && memory.user_daily_routine !== '__skipped__' ? memory.user_daily_routine : '';
+  const profile  = profileRes?.profile || App.currentProfile || {};
+  const prefs    = profile.study_preferences || {};
+
+  // Extract server-managed provider statuses and usage
+  const providerData = providersRes?.data?.providers || providersRes?.providers || (Array.isArray(providersRes?.data) ? providersRes.data : []);
+  const geminiStatus = providerData.find(p => p.provider === 'gemini') || { configured: false };
+  const groqStatus   = providerData.find(p => p.provider === 'groq')   || { configured: false };
+
+  const usageData = usageRes?.data || { used: 0, daily_limit: 50, remaining: 50 };
 
   container.innerHTML = `
-    <div class="page-header">
-      <div><div class="page-title">Settings</div><div class="page-subtitle">Customise StudyFlow AI</div></div>
+    <div class="page-header" style="max-width:680px">
+      <div>
+        <div class="page-title">Settings</div>
+        <div class="page-subtitle">Configure your account, study preferences, and application appearance.</div>
+      </div>
     </div>
 
-    <div class="card" style="max-width:600px;margin-bottom:16px">
-      <div class="card-title">👤 Profile</div>
+    <div class="card" id="settings-section-account" style="max-width:680px;margin-bottom:16px;padding:20px 22px">
+      <div class="card-title" style="font-size:14px;margin-bottom:6px">⚙️ Account Settings & Profile</div>
+      <div style="font-size:12px;color:var(--text-3);margin-bottom:14px">Manage your name and target daily XP score.</div>
       <div class="form-group">
         <label class="form-label">Your Name</label>
         <input class="form-input" id="setting-name" value="${escapeHTML(settings.user_name||'Student')}">
@@ -4185,10 +4419,10 @@ async function renderSettings(container) {
       </div>
     </div>
 
-    <div class="card" style="max-width:600px;margin-bottom:16px">
-      <div class="card-title">🗓️ Daily Routine</div>
-      <div style="font-size:12px;color:var(--text-3);margin-bottom:10px">
-        Used by the AI planner so it never schedules study time over your college, work, sleep, or other commitments.
+    <div class="card" id="settings-section-memory" style="max-width:680px;margin-bottom:16px;padding:20px 22px">
+      <div class="card-title" style="font-size:14px;margin-bottom:6px">🧠 Memory & Daily Routine</div>
+      <div style="font-size:12px;color:var(--text-3);margin-bottom:14px">
+        Used by the AI mentor so study sessions and tasks respect your college, work, sleep, and routine commitments.
       </div>
       <div class="form-group">
         <textarea class="form-input" id="setting-routine" rows="3" style="width:100%;resize:vertical;font-family:inherit"
@@ -4197,40 +4431,81 @@ async function renderSettings(container) {
       <button class="btn btn-primary btn-sm" data-action="saveRoutineSetting">Save Routine</button>
     </div>
 
-    <div class="card" style="max-width:600px;margin-bottom:16px">
-      <div class="card-title">🎨 Theme</div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${['dark','light','blue','cyberpunk','minimal'].map(t => `
-          <button class="btn btn-sm ${(settings.theme||'dark')===t?'btn-primary':'btn-ghost'}"
-            data-action="setTheme" data-theme="${t}">${t.charAt(0).toUpperCase()+t.slice(1)}</button>
-        `).join('')}
+    <div class="card" id="settings-section-preferences" style="max-width:680px;margin-bottom:16px;padding:20px 22px">
+      <div class="card-title" style="font-size:14px;margin-bottom:6px">📚 Study Preferences</div>
+      <div style="font-size:12px;color:var(--text-3);margin-bottom:14px">Customize your preferred learning pace and daily focus methodology.</div>
+      <div class="grid-2" style="gap:12px">
+        <div class="form-group">
+          <label class="form-label">Preferred Study Pace</label>
+          <select class="form-input" id="setting-pace">
+            <option value="moderate" ${(prefs.pace || 'moderate') === 'moderate' ? 'selected' : ''}>Moderate (Balanced)</option>
+            <option value="intense" ${prefs.pace === 'intense' ? 'selected' : ''}>Intense (Fast-paced)</option>
+            <option value="relaxed" ${prefs.pace === 'relaxed' ? 'selected' : ''}>Relaxed (Gentle)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Daily Focus Style</label>
+          <input class="form-input" id="setting-focus-style" value="${escapeHTML(prefs.focus_style || 'Deep Work')}" placeholder="e.g. Deep Work, Pomodoro, Exam Sprints">
+        </div>
       </div>
     </div>
 
-    <div class="card" style="max-width:600px;margin-bottom:16px">
-      <div class="card-title">🤖 AI Provider Keys</div>
-      <div class="form-group">
-        <label class="form-label">Gemini API Key (Primary)</label>
-        <div style="display:flex;gap:8px">
-          <input class="form-input" type="password" id="setting-gemini" value="${settings.gemini_api_key||''}" placeholder="AIza..." style="flex:1">
-          <button class="btn btn-ghost btn-sm" data-action="testProviderKey" data-provider="gemini" id="test-key-gemini-btn">Test Key</button>
-        </div>
-        <div id="test-key-gemini-status" style="font-size:11px;margin-top:6px"></div>
+    <div class="card" id="settings-section-theme" style="max-width:680px;margin-bottom:16px;padding:20px 22px">
+      <div class="card-title" style="font-size:14px;margin-bottom:6px">🎨 Theme</div>
+      <div style="font-size:12px;color:var(--text-3);margin-bottom:14px">Select your preferred application appearance:</div>
+      <div style="display:grid;grid-template-columns:repeat(2, 1fr);gap:12px">
+        <button class="btn ${(settings.theme||'dark')==='dark' ? 'btn-primary' : 'btn-secondary'}"
+          style="padding:12px 16px;font-size:13px;display:flex;align-items:center;justify-content:center;gap:8px"
+          data-action="setTheme" data-theme="dark">
+          <span style="font-size:16px">🌙</span>
+          <span style="font-weight:700">Dark Theme</span>
+          ${(settings.theme||'dark')==='dark' ? '<span style="font-size:10px;background:rgba(0,0,0,0.25);padding:2px 7px;border-radius:10px;margin-left:4px">Active</span>' : ''}
+        </button>
+        <button class="btn ${(settings.theme||'dark')==='light' ? 'btn-primary' : 'btn-secondary'}"
+          style="padding:12px 16px;font-size:13px;display:flex;align-items:center;justify-content:center;gap:8px"
+          data-action="setTheme" data-theme="light">
+          <span style="font-size:16px">☀️</span>
+          <span style="font-weight:700">Light Theme</span>
+          ${(settings.theme||'dark')==='light' ? '<span style="font-size:10px;background:rgba(255,255,255,0.25);padding:2px 7px;border-radius:10px;margin-left:4px">Active</span>' : ''}
+        </button>
       </div>
-      <div class="form-group">
-        <label class="form-label">Groq API Key (Fallback)</label>
-        <div style="display:flex;gap:8px">
-          <input class="form-input" type="password" id="setting-groq" value="${settings.groq_api_key||''}" placeholder="gsk_..." style="flex:1">
-          <button class="btn btn-ghost btn-sm" data-action="testProviderKey" data-provider="groq" id="test-key-groq-btn">Test Key</button>
-        </div>
-        <div id="test-key-groq-status" style="font-size:11px;margin-top:6px"></div>
-      </div>
-      <div style="font-size:11px;color:var(--text-3)">Without keys, StudyFlow AI uses 🌐 Offline Mode for all AI features.</div>
     </div>
 
-    <div class="card" style="max-width:600px;margin-bottom:16px">
-      <div class="card-title">⏱ Focus Settings</div>
-      <div class="grid-2" style="gap:10px">
+    <div class="card" id="settings-section-ai" style="max-width:680px;margin-bottom:16px;padding:20px 22px">
+      <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;font-size:14px;margin-bottom:6px">
+        <span>🤖 AI Services</span>
+        <span style="font-size:10.5px;color:var(--accent);background:rgba(201,168,76,0.1);padding:3px 8px;border-radius:12px;border:1px solid rgba(201,168,76,0.25)">Server-Managed</span>
+      </div>
+      <div style="font-size:12px;color:var(--text-3);margin-bottom:14px">AI models are powered and managed automatically by the StudyFlow AI backend.</div>
+      
+      <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--bg-2, rgba(255,255,255,0.03));border-radius:8px">
+          <span style="color:var(--text-2)">AI Service</span>
+          <span style="font-weight:600;color:var(--text-1)">Managed by StudyFlow AI</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--bg-2, rgba(255,255,255,0.03));border-radius:8px">
+          <span style="color:var(--text-2)">Gemini</span>
+          <span style="font-weight:600;color:${geminiStatus.configured ? 'var(--success)' : 'var(--text-3)'}">${geminiStatus.configured ? '● Available' : '○ Unavailable'}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--bg-2, rgba(255,255,255,0.03));border-radius:8px">
+          <span style="color:var(--text-2)">Groq fallback</span>
+          <span style="font-weight:600;color:${groqStatus.configured ? 'var(--success)' : 'var(--text-3)'}">${groqStatus.configured ? '● Available' : '○ Unavailable'}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--bg-2, rgba(255,255,255,0.03));border-radius:8px">
+          <span style="color:var(--text-2)">Daily usage</span>
+          <span style="font-weight:600;color:var(--text-1)">${usageData.used || 0} / ${usageData.daily_limit || 50} requests</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--bg-2, rgba(255,255,255,0.03));border-radius:8px">
+          <span style="color:var(--text-2)">Remaining</span>
+          <span style="font-weight:600;color:var(--accent)">${usageData.remaining !== undefined ? usageData.remaining : 50} requests</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="settings-section-focus" style="max-width:680px;margin-bottom:16px;padding:20px 22px">
+      <div class="card-title" style="font-size:14px;margin-bottom:6px">⏱ Focus Settings</div>
+      <div style="font-size:12px;color:var(--text-3);margin-bottom:14px">Set default timers for your Pomodoro and deep work sessions.</div>
+      <div class="grid-2" style="gap:12px">
         <div class="form-group">
           <label class="form-label">Focus Duration (min)</label>
           <input class="form-input" type="number" id="setting-focus" value="${settings.focus_duration||25}">
@@ -4242,38 +4517,61 @@ async function renderSettings(container) {
       </div>
     </div>
 
-    <div style="max-width:600px">
-      <button class="btn btn-primary" id="save-settings-btn">💾 Save Settings</button>
+    <div style="max-width:680px">
+      <button class="btn btn-primary" id="save-settings-btn" style="padding:10px 24px;font-size:13px">💾 Save Settings</button>
     </div>
   `;
   document
-  .getElementById('save-settings-btn')
-  ?.addEventListener('click', saveSettings);
+    .getElementById('save-settings-btn')
+    ?.addEventListener('click', saveSettings);
 }
 
 async function saveSettings() {
-  const settings = {
-    user_name:      document.getElementById('setting-name')?.value.trim() || 'Student',
-    daily_xp_goal:  document.getElementById('setting-xp-goal')?.value || '100',
-    gemini_api_key: document.getElementById('setting-gemini')?.value.trim() || '',
-    groq_api_key:   document.getElementById('setting-groq')?.value.trim() || '',
-    focus_duration: document.getElementById('setting-focus')?.value || '25',
-    break_duration: document.getElementById('setting-break')?.value || '5'
+  const nameVal   = document.getElementById('setting-name')?.value.trim() || 'Student';
+  const xpGoalVal = document.getElementById('setting-xp-goal')?.value || '100';
+  const focusVal  = document.getElementById('setting-focus')?.value || '25';
+  const breakVal  = document.getElementById('setting-break')?.value || '5';
+  const paceVal   = document.getElementById('setting-pace')?.value || 'moderate';
+  const focusStyleVal = document.getElementById('setting-focus-style')?.value.trim() || 'Deep Work';
+
+  // 1. Save general settings to local SQLite
+  const localSettings = {
+    user_name:      nameVal,
+    daily_xp_goal:  xpGoalVal,
+    focus_duration: focusVal,
+    break_duration: breakVal,
   };
 
-  for (const [key, value] of Object.entries(settings)) {
+  for (const [key, value] of Object.entries(localSettings)) {
     await window.studyflow.db('setSetting', key, value);
   }
+  App.settings = { ...App.settings, ...localSettings };
 
-  App.settings = { ...App.settings, ...settings };
+  // 2. Save profile display_name & study preferences to backend
+  if (window.ProfileService) {
+    window.ProfileService.updateProfile({ display_name: nameVal }).catch(err => {
+      console.warn('[App] Profile display_name sync warning:', err);
+    });
+    window.ProfileService.updatePreferences({ pace: paceVal, focus_style: focusStyleVal }).catch(err => {
+      console.warn('[App] Profile preferences sync warning:', err);
+    });
+  }
+
   toast('Settings saved!', 'success');
   await updateSidebarXP();
+  await navigateTo('settings');
 }
 
 async function setTheme(theme) {
-  await window.studyflow.db('setSetting', 'theme', theme);
-  applyTheme(theme);
-  await navigateTo('settings');
+  const validThemes = ['dark', 'light'];
+  const safeTheme = validThemes.includes(theme) ? theme : 'dark';
+  await window.studyflow.db('setSetting', 'theme', safeTheme);
+  App.settings.theme = safeTheme;
+  if (window.ProfileService) {
+    window.ProfileService.updatePreferences({ theme: safeTheme }).catch(() => {});
+  }
+  applyTheme(safeTheme);
+  await navigateTo('settings', 'theme');
 }
 
 function getLast7Days() {

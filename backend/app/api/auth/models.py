@@ -51,6 +51,9 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    onboarding_status: Mapped[str] = mapped_column(
+        String(30), default="not_started", nullable=False
+    )  # 'not_started' | 'in_progress' | 'completed' | 'skipped'
 
     # OTP for email verification / password reset
     otp_code: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
@@ -75,6 +78,15 @@ class User(Base):
     # Relationships
     sessions: Mapped[list["Session"]] = relationship(
         "Session", back_populates="user", cascade="all, delete-orphan"
+    )
+    profile: Mapped[Optional["UserProfile"]] = relationship(
+        "UserProfile", back_populates="user", uselist=False, cascade="all, delete-orphan"
+    )
+    tasks: Mapped[list["Task"]] = relationship(
+        "Task", back_populates="user", cascade="all, delete-orphan"
+    )
+    profile_contexts: Mapped[list["UserProfileContext"]] = relationship(
+        "UserProfileContext", back_populates="user", cascade="all, delete-orphan"
     )
 
     def __repr__(self) -> str:

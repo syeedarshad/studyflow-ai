@@ -54,6 +54,7 @@ console.log('\n== Fresh install (new Database(), no pre-existing file) ==');
     assert.ok(u.id);
     const logged = db.userRepository.verifyLogin('test@example.com', 'password1234');
     assert.strictEqual(logged.id, u.id);
+    db.setActiveUser(u.id);
   });
 
   check('addTask() + getTodayTasks() still work after all migrations (no regression)', () => {
@@ -66,8 +67,10 @@ console.log('\n== Fresh install (new Database(), no pre-existing file) ==');
     db.setSetting('gemini_api_key', 'AIzaSy-test-key-value');
     const readBack = db.getSetting('gemini_api_key');
     assert.strictEqual(readBack, 'AIzaSy-test-key-value');
-    const raw = db.db.prepare("SELECT value FROM settings WHERE key='gemini_api_key'").get().value;
-    assert.ok(raw.startsWith('enc:'), 'raw stored value should be encrypted, not plaintext');
+    // The user-scoped row must be encrypted; the raw query targets the active user's row
+    const raw = db.db.prepare("SELECT value FROM settings WHERE key='gemini_api_key' AND user_id IS NOT NULL ORDER BY id DESC LIMIT 1").get();
+    assert.ok(raw, 'Expected a user-scoped gemini_api_key row in settings');
+    assert.ok(raw.value.startsWith('enc:'), `raw stored value should be encrypted, not plaintext — got: ${raw.value.slice(0,20)}`);
   });
 }
 
@@ -204,6 +207,143 @@ console.log('\n== Legacy upgrade path (pre-existing populated db, old schema) ==
   check('a pre-migration backup file was actually written to disk', () => {
     const files = fs.readdirSync(legacyDir);
     assert.ok(files.some(f => f.includes('pre-fk-migration')), `no backup file found among: ${files.join(', ')}`);
+  });
+
+  electronMock.app.getPath = originalGetPath;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// TEST 3 — Multi-Account Data Isolation and Unowned Records Protection
+// ═══════════════════════════════════════════════════════════════════
+console.log('\n== Multi-Account Data Isolation and Unowned Records Safety ==');
+{
+  const isolationDir = path.join(FAKE_USERDATA, 'isolation-test');
+  try { fs.rmSync(isolationDir, { recursive: true, force: true }); } catch {}
+  fs.mkdirSync(isolationDir, { recursive: true });
+
+  const electronMock = require('electron');
+  const originalGetPath = electronMock.app.getPath;
+  electronMock.app.getPath = () => isolationDir;
+
+  delete require.cache[require.resolve('../src/main/database')];
+  const StudyFlowDB = require('../src/main/database');
+  const db = new StudyFlowDB();
+
+  // Create User A and User B
+  const userA = db.userRepository.register('Alice', 'alice@test.com', 'password123');
+  const userB = db.userRepository.register('Bob', 'bob@test.com', 'password123');
+
+  check('User A and User B have distinct user IDs', () => {
+    assert.ok(userA.id);
+    assert.ok(userB.id);
+    assert.notStrictEqual(userA.id, userB.id);
+  });
+
+  check('When active user is NULL, scoped queries return empty results and writes are rejected', () => {
+    db.setActiveUser(null);
+    assert.strictEqual(db.getTasks().length, 0);
+    assert.strictEqual(db.getTodayTasks().length, 0);
+    assert.strictEqual(db.getTotalXP(), 0);
+    assert.strictEqual(db.notesRepository.getNotes().length, 0);
+    assert.strictEqual(db.goalRepository.getGoals().length, 0);
+
+    const taskRes = db.addTask({ title: 'Task without user' });
+    assert.strictEqual(taskRes, null);
+  });
+
+  check('User A data is isolated and invisible to User B', () => {
+    // Log in User A
+    db.setActiveUser(userA.id);
+    db.addTask({ title: 'Alice Task 1', category: 'DSA', due_date: new Date().toISOString().slice(0, 10) });
+    db.awardXP(100, 'Completed DSA', 'DSA');
+    db.notesRepository.addNote('Alice Note', 'Top secret Alice note');
+    db.goalRepository.addGoal({ title: 'Alice Goal', category: 'DSA' });
+
+    assert.strictEqual(db.getTasks().length, 1);
+    assert.strictEqual(db.getTasks()[0].title, 'Alice Task 1');
+    assert.strictEqual(db.getTotalXP(), 100);
+    assert.strictEqual(db.notesRepository.getNotes().length, 1);
+    assert.strictEqual(db.goalRepository.getGoals().length, 1);
+
+    // Switch to User B
+    db.setActiveUser(userB.id);
+    assert.strictEqual(db.getTasks().length, 0, 'User B must see 0 tasks from User A');
+    assert.strictEqual(db.getTodayTasks().length, 0, 'User B must see 0 today tasks from User A');
+    assert.strictEqual(db.getTotalXP(), 0, 'User B must start with 0 XP');
+    assert.strictEqual(db.notesRepository.getNotes().length, 0, 'User B must see 0 notes from User A');
+    assert.strictEqual(db.goalRepository.getGoals().length, 0, 'User B must see 0 goals from User A');
+
+    // User B adds their own data
+    db.addTask({ title: 'Bob Task 1', category: 'DevOps', due_date: new Date().toISOString().slice(0, 10) });
+    db.awardXP(50, 'Completed Setup', 'DevOps');
+    assert.strictEqual(db.getTasks().length, 1);
+    assert.strictEqual(db.getTasks()[0].title, 'Bob Task 1');
+    assert.strictEqual(db.getTotalXP(), 50);
+
+    // Switch back to User A
+    db.setActiveUser(userA.id);
+    assert.strictEqual(db.getTasks().length, 1);
+    assert.strictEqual(db.getTasks()[0].title, 'Alice Task 1');
+    assert.strictEqual(db.getTotalXP(), 100);
+  });
+
+  check('Legacy/unowned records (user_id IS NULL) are preserved but never returned in scoped user queries', () => {
+    // Manually insert an unowned legacy row into SQLite directly
+    db.db.exec("INSERT INTO tasks (title, category, user_id) VALUES ('Legacy Unowned Task', 'Legacy', NULL)");
+
+    // User A query
+    db.setActiveUser(userA.id);
+    const userATasks = db.getTasks();
+    assert.ok(!userATasks.some(t => t.title === 'Legacy Unowned Task'), 'User A must NOT see legacy unowned task');
+
+    // User B query
+    db.setActiveUser(userB.id);
+    const userBTasks = db.getTasks();
+    assert.ok(!userBTasks.some(t => t.title === 'Legacy Unowned Task'), 'User B must NOT see legacy unowned task');
+
+    // Verify row still exists non-destructively in the physical SQLite table
+    const unownedRow = db.db.prepare("SELECT * FROM tasks WHERE title = 'Legacy Unowned Task'").get();
+    assert.ok(unownedRow, 'Unowned legacy row must remain preserved in physical database');
+    assert.strictEqual(unownedRow.user_id, null);
+  });
+
+  check('Repeated app launches without active user do not insert duplicate settings or unowned rows', () => {
+    // Count settings rows before simulated launches
+    const countBefore = db.db.prepare('SELECT COUNT(*) n FROM settings WHERE user_id IS NULL').get().n;
+
+    // Simulate 3 consecutive launches / StudyFlowDB instantiations
+    new StudyFlowDB();
+    new StudyFlowDB();
+    new StudyFlowDB();
+
+    const countAfter = db.db.prepare('SELECT COUNT(*) n FROM settings WHERE user_id IS NULL').get().n;
+    assert.strictEqual(countAfter, countBefore, 'Repeated launches must not insert duplicate null-user settings rows');
+  });
+
+  check('In-memory defaults are cleanly served when active user is NULL or has not customized a setting', () => {
+    const launchDb = new StudyFlowDB();
+    // With active user NULL:
+    assert.strictEqual(launchDb.getSetting('theme'), 'dark');
+    assert.strictEqual(launchDb.getSetting('daily_xp_goal'), '100');
+    assert.strictEqual(launchDb.getAllSettings().user_name, 'Student');
+
+    // Setting write with active user NULL is rejected:
+    const setRes = launchDb.setSetting('theme', 'light');
+    assert.strictEqual(setRes, null);
+    assert.strictEqual(launchDb.getSetting('theme'), 'dark');
+
+    // With active user A:
+    launchDb.setActiveUser(userA.id);
+    launchDb.setSetting('theme', 'light');
+    assert.strictEqual(launchDb.getSetting('theme'), 'light');
+
+    // Switch to active user B (has not customized theme):
+    launchDb.setActiveUser(userB.id);
+    assert.strictEqual(launchDb.getSetting('theme'), 'dark', 'User B receives default theme');
+
+    // Switch to NULL user:
+    launchDb.setActiveUser(null);
+    assert.strictEqual(launchDb.getSetting('theme'), 'dark', 'NULL user receives in-memory default theme');
   });
 
   electronMock.app.getPath = originalGetPath;

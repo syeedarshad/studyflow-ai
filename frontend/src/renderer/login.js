@@ -65,8 +65,8 @@ els.form.addEventListener('submit', async (e) => {
   setLoading(true);
   try {
     const res = mode === 'register'
-      ? await window.studyflow.authRegister(fullName, email, password)
-      : await window.studyflow.authLogin(email, password);
+      ? await window.AuthGateway.register(fullName, email, password)
+      : await window.AuthGateway.login(email, password);
 
     if (!res.success) {
       showError(res.error || 'Something went wrong. Please try again.');

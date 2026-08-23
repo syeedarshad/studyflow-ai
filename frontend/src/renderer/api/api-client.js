@@ -1,140 +1,169 @@
 /**
  * StudyFlow AI — Base API Client
  * ─────────────────────────────────────────────────────────────
- * All communication between the Electron renderer and the FastAPI
- * backend passes through this module.
+ * All HTTP communication between the Electron renderer and the
+ * FastAPI backend passes through this module.
  *
  * Responsibilities:
- *  - Attach the session token to every request
- *  - Handle network errors gracefully (show offline state)
- *  - Parse JSON responses into a uniform shape
- *  - Retry on network failure with exponential backoff
+ *  - Read base URL and timeouts from ConfigService (no hardcoding)
+ *  - Attach session token to every authenticated request
+ *  - Automatic retry with exponential backoff (idempotent requests)
+ *  - Latency measurement logged via LoggerService
+ *  - Emit EventBus events on backend-online / backend-offline transitions
+ *  - Normalise all responses to { success, data, error, status }
  *
- * This module is intentionally small — it is the foundation
- * every other api/*.js module builds on.
+ * Attached to: window.StudyFlow.api
+ * Backward-compat alias: window.api
+ *
+ * Depends on: window.StudyFlow.config, window.StudyFlow.logger,
+ *             window.StudyFlow.events, window.StudyFlow.errors
  */
 
 'use strict';
 
-const BACKEND_URL = 'http://127.0.0.1:8000';
-const API_BASE    = `${BACKEND_URL}/api/v1`;
+(function (SF) {
 
-// Electron platform info — sent as X-Device-Label on first login
-const DEVICE_LABEL = `Windows / StudyFlow AI`;
+  // ─── Session Token (in-memory cache) ─────────────────────────────────────
+  let _cachedToken = null;
 
-// ─── Session Token Storage ────────────────────────────────────────────────────
-// The renderer process cannot call safeStorage directly (that's main-process only).
-// We use the preload bridge (window.studyflow.session.*) to read/write the token
-// stored in Electron safeStorage.  In the API layer we cache the token in memory
-// for the lifetime of the renderer process — it is cleared on logout.
-let _cachedToken = null;
+  function _setToken(t)   { _cachedToken = t || null; }
+  function _getToken()    { return _cachedToken; }
+  function _clearToken()  { _cachedToken = null; }
 
-function _setToken(token) {
-  _cachedToken = token || null;
-}
+  // ─── Connectivity State ───────────────────────────────────────────────────
+  let _lastOnlineState = null; // null = unknown
 
-function _getToken() {
-  return _cachedToken;
-}
-
-function _clearToken() {
-  _cachedToken = null;
-}
-
-// ─── Request Helper ───────────────────────────────────────────────────────────
-
-/**
- * Makes an authenticated HTTP request to the FastAPI backend.
- *
- * @param {string} method  — HTTP method (GET, POST, PUT, DELETE, PATCH)
- * @param {string} path    — API path, e.g. '/auth/login'
- * @param {object} [body]  — JSON body (for POST/PUT/PATCH)
- * @param {object} [opts]  — extra options
- * @param {boolean} [opts.auth=true]       — attach session token header
- * @param {boolean} [opts.throwOnError=false] — throw on non-2xx
- * @returns {Promise<{success: boolean, data?: any, error?: string, status: number}>}
- */
-async function request(method, path, body = null, opts = {}) {
-  const { auth = true, throwOnError = false } = opts;
-
-  const headers = {
-    'Content-Type': 'application/json',
-    'X-Device-Label': DEVICE_LABEL,
-  };
-
-  if (auth) {
-    const token = _getToken();
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+  function _notifyConnectivity(isOnline) {
+    if (_lastOnlineState === isOnline) return;   // no change
+    _lastOnlineState = isOnline;
+    SF.events?.emit(isOnline ? 'backend-online' : 'backend-offline', {});
   }
 
-  const url = `${API_BASE}${path}`;
+  // ─── Core Request ────────────────────────────────────────────────────────
 
-  let response;
-  try {
-    response = await fetch(url, {
-      method,
-      headers,
-      body: body != null ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(30000), // 30 second timeout
-    });
-  } catch (err) {
-    // Network error (server not running, no internet, etc.)
-    const errorResult = {
-      success: false,
-      error: 'Cannot connect to StudyFlow AI backend. Working offline.',
-      isNetworkError: true,
-      status: 0,
+  const IDEMPOTENT = new Set(['GET', 'HEAD', 'PUT', 'DELETE']);
+
+  /**
+   * @param {string} method
+   * @param {string} path     — e.g. '/auth/login'
+   * @param {object} [body]
+   * @param {object} [opts]   — { auth, throwOnError }
+   */
+  async function request(method, path, body = null, opts = {}) {
+    const cfg  = SF.config || {
+      apiBase:        'http://127.0.0.1:8000/api/v1',
+      backendUrl:     'http://127.0.0.1:8000',
+      maxRetries:     2,
+      retryDelay:     1000,
+      requestTimeout: 30000,
+      deviceLabel:    'Windows / StudyFlow AI 2.0',
     };
-    if (throwOnError) throw new Error(errorResult.error);
-    return errorResult;
+    const log  = SF.logger;
+    const { auth = true, throwOnError = false } = opts;
+
+    const url      = `${cfg.apiBase}${path}`;
+    const maxTries = IDEMPOTENT.has(method) ? cfg.maxRetries + 1 : 1;
+    let   attempt  = 0;
+    let   lastErr  = null;
+
+    while (attempt < maxTries) {
+      attempt++;
+
+      // Build headers fresh each attempt (token may change between retries)
+      const headers = {
+        'Content-Type':  'application/json',
+        'X-Device-Label': cfg.deviceLabel,
+      };
+      if (auth && _cachedToken) {
+        headers['Authorization'] = `Bearer ${_cachedToken}`;
+      }
+
+      const t0 = Date.now();
+
+      let response;
+      try {
+        response = await fetch(url, {
+          method,
+          headers,
+          body: body != null ? JSON.stringify(body) : undefined,
+          signal: AbortSignal.timeout(cfg.requestTimeout),
+        });
+      } catch (fetchErr) {
+        const latency = Date.now() - t0;
+        log?.warn(`[ApiClient] ${method} ${path} attempt ${attempt} — network error after ${latency}ms:`, fetchErr.message);
+
+        lastErr = {
+          success:        false,
+          error:          'Cannot connect to StudyFlow AI backend. Working offline.',
+          isNetworkError: true,
+          status:         0,
+        };
+        _notifyConnectivity(false);
+
+        if (attempt < maxTries) {
+          const delay = cfg.retryDelay * Math.pow(2, attempt - 1);
+          log?.debug(`[ApiClient] Retrying in ${delay}ms…`);
+          await new Promise(r => setTimeout(r, delay));
+          continue;
+        }
+
+        if (throwOnError) throw new Error(lastErr.error);
+        return lastErr;
+      }
+
+      // ── Parse response ──────────────────────────────────────────────────
+      const latency = Date.now() - t0;
+      let data = {};
+      try {
+        const text = await response.text();
+        if (text) data = JSON.parse(text);
+      } catch { /* leave data as {} */ }
+
+      const ok = response.status >= 200 && response.status < 300;
+
+      if (ok) {
+        _notifyConnectivity(true);
+        log?.debug(`[ApiClient] ${method} ${path} → ${response.status} (${latency}ms)`);
+        return { success: true, data, status: response.status };
+      }
+
+      // ── Non-2xx ────────────────────────────────────────────────────────
+      const error = data?.detail || data?.error || `HTTP ${response.status}`;
+      log?.warn(`[ApiClient] ${method} ${path} → ${response.status} (${latency}ms): ${error}`);
+      _notifyConnectivity(true);   // server responded — we ARE online
+
+      const result = { success: false, error, status: response.status, data };
+      if (throwOnError) throw new Error(error);
+      return result;
+    }
+
+    // Should never reach here, but safety net
+    if (throwOnError) throw new Error(lastErr?.error || 'Request failed');
+    return lastErr || { success: false, error: 'Request failed', status: 0 };
   }
 
-  let data;
-  try {
-    const text = await response.text();
-    data = text ? JSON.parse(text) : {};
-  } catch {
-    data = {};
-  }
+  // ─── Public API ───────────────────────────────────────────────────────────
 
-  const ok = response.status >= 200 && response.status < 300;
+  const api = Object.freeze({
+    get:    (path, opts)        => request('GET',    path, null, opts),
+    post:   (path, body, opts)  => request('POST',   path, body, opts),
+    put:    (path, body, opts)  => request('PUT',    path, body, opts),
+    patch:  (path, body, opts)  => request('PATCH',  path, body, opts),
+    delete: (path, opts)        => request('DELETE', path, null, opts),
 
-  if (!ok) {
-    const error = data?.detail || data?.error || `HTTP ${response.status}`;
-    const result = { success: false, error, status: response.status, data };
-    if (throwOnError) throw new Error(error);
-    return result;
-  }
+    // Token management — used by SessionManager
+    setToken:   _setToken,
+    getToken:   _getToken,
+    clearToken: _clearToken,
 
-  return {
-    success: true,
-    data,
-    status: response.status,
-  };
-}
+    // Expose config values for other modules
+    get BACKEND_URL() { return SF.config?.backendUrl; },
+    get API_BASE()    { return SF.config?.apiBase; },
+  });
 
-// ─── Convenience Methods ──────────────────────────────────────────────────────
+  SF.api = api;
 
-const api = {
-  get:    (path, opts)       => request('GET',    path, null, opts),
-  post:   (path, body, opts) => request('POST',   path, body, opts),
-  put:    (path, body, opts) => request('PUT',    path, body, opts),
-  patch:  (path, body, opts) => request('PATCH',  path, body, opts),
-  delete: (path, opts)       => request('DELETE', path, null, opts),
+  // Backward-compatibility alias so existing app.js references keep working
+  window.api = api;
 
-  // Token management — used by AuthService
-  setToken:   _setToken,
-  getToken:   _getToken,
-  clearToken: _clearToken,
-
-  // Backend URL (useful for WebSocket construction)
-  BACKEND_URL,
-  API_BASE,
-};
-
-// Export for Node.js / CommonJS (Electron renderer with contextIsolation)
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = api;
-}
+})(window.StudyFlow = window.StudyFlow || {});

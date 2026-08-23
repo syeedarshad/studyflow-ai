@@ -52,21 +52,49 @@ app.whenReady().then(() => {
     aiProvider = new ProviderManager(db);
 
     // ─── Auth gate: decide login screen vs. straight-to-dashboard ──────
-    // Persistent-login check — see session-manager.js. No expiry, no
-    // token validation beyond confirming the account still exists.
+    // Phase 1 check: local SQLite session (legacy / offline path).
+    // Phase 2 check: FastAPI backend session token stored in electron-store.
+    // Either a valid local session OR a stored backend token sends the user
+    // straight to index.html — the renderer validates the backend token on load.
     let startPage = 'login.html';
+
     const authSession = sessionManager.getSession();
     if (authSession) {
       const user = db.userRepository.getById(authSession.userId);
       if (user) {
         currentUser = user;
+        db.setActiveUser(user.id);
         startPage = 'index.html';
-        logger.authEvent('auto-login from persisted session', user.id);
+        logger.authEvent('auto-login from local persisted session', user.id);
       } else {
         // Session pointed at an account that no longer exists — clear it.
         sessionManager.clearSession();
       }
     }
+
+    // Phase 2: also check for a stored FastAPI backend session token.
+    // If one is present, the renderer-side AuthGateway will validate it
+    // against the backend and navigate accordingly — we just need to land
+    // on index.html so the validation call can happen.
+    if (startPage === 'login.html') {
+      try {
+        const { decrypt } = require('./secure-store');
+        const Store = require('electron-store');
+        const tokenStore = new Store({ name: 'backend-session' });
+        const encrypted = tokenStore.get('token');
+        if (encrypted) {
+          const token = decrypt(encrypted);
+          if (token) {
+            startPage = 'index.html';
+            logger.authEvent('auto-login from backend session token (will validate on renderer)');
+          }
+        }
+      } catch (err) {
+        // Non-fatal — just show login screen if token can't be read
+        logger.ipcError('startup backend-session check', err);
+      }
+    }
+
 
     createMainWindow(startPage);
     createTray();
@@ -107,6 +135,74 @@ app.on('activate', () => {
 // WINDOW CREATION
 // ═══════════════════════════════════════════════════════════════════════
 
+// ─── CSP Builder ──────────────────────────────────────────────────────────────
+// Called once per window creation. Derives the allowed backend origin from
+// STUDYFLOW_BACKEND_URL (set in the environment before Electron starts), then
+// injects a tight Content-Security-Policy via webRequest so neither index.html
+// nor login.html need to contain any hardcoded origin strings.
+//
+// Development  → STUDYFLOW_BACKEND_URL not set → defaults to http://127.0.0.1:8000
+// Production   → STUDYFLOW_BACKEND_URL=https://api.yourdomain.com
+//
+// The resulting connect-src allows ONLY 'self' + the configured backend origin
+// (both http and the matching ws:// origin for WebSocket traffic).
+// No wildcard (*) is ever used.
+function _buildCsp(extraScriptSrc = '') {
+  const raw = (process.env.STUDYFLOW_BACKEND_URL || 'http://127.0.0.1:8000')
+    .replace(/\/+$/, '');               // strip trailing slashes
+
+  // Safely parse the backend origin.  If the URL is somehow malformed, fall
+  // back to localhost so the app can still start rather than crashing.
+  let httpOrigin = 'http://127.0.0.1:8000';
+  let wsOrigin   = 'ws://127.0.0.1:8000';
+  try {
+    const parsed = new URL(raw);
+    httpOrigin = parsed.origin;                        // e.g. https://api.example.com
+    wsOrigin   = httpOrigin.replace(/^https?:\/\//, 'ws://').replace(/^http:\/\//, 'ws://');
+    // Preserve wss:// when the backend is https://
+    if (parsed.protocol === 'https:') {
+      wsOrigin = httpOrigin.replace(/^https:\/\//, 'wss://');
+    }
+  } catch {
+    logger.warn(`CSP: STUDYFLOW_BACKEND_URL "${raw}" is not a valid URL; falling back to localhost.`);
+  }
+
+  // Build a tightly-scoped CSP.
+  // script-src allows CDNs required by the dashboard (Chart.js).
+  // style-src allows inline styles (used throughout the renderer).
+  // object-src and base-uri are locked to 'none' and 'self' respectively.
+  const scriptSrc = extraScriptSrc
+    ? `'self' ${extraScriptSrc}`
+    : `'self'`;
+
+  return [
+    `default-src 'self'`,
+    `connect-src 'self' ${httpOrigin} ${wsOrigin}`,
+    `script-src ${scriptSrc}`,
+    `style-src 'self' 'unsafe-inline'`,
+    `img-src 'self' data:`,
+    `object-src 'none'`,
+    `base-uri 'self'`,
+    `frame-src 'none'`,
+  ].join('; ');
+}
+
+// Attach the CSP header interceptor to a BrowserWindow's session.
+// Must be called after the BrowserWindow is created, before loadFile().
+function _attachCsp(win, extraScriptSrc = '') {
+  const csp = _buildCsp(extraScriptSrc);
+  win.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        // Overwrite any CSP the HTML file itself may declare (belt-and-suspenders).
+        'Content-Security-Policy': [csp],
+      },
+    });
+  });
+}
+// ──────────────────────────────────────────────────────────────────────────────
+
 function createMainWindow(startPage = 'index.html') {
   mainWindow = new BrowserWindow({
     width:           1280,
@@ -124,19 +220,24 @@ function createMainWindow(startPage = 'index.html') {
     }
   });
 
+  // Inject the dynamic CSP before the page loads.
+  // index.html loads Chart.js from cdnjs/jsdelivr — allow those CDNs in script-src.
+  _attachCsp(mainWindow, 'https://cdn.jsdelivr.net https://cdnjs.cloudflare.com');
+
   mainWindow.loadFile(path.join(__dirname, '../renderer', startPage));
 
-  // Frameless window + no menu bar means there's normally no way to reach
-  // DevTools at all — bind F12 / Ctrl+Shift+I directly so console errors
-  // are always reachable when debugging something like a frozen UI.
-  mainWindow.webContents.on('before-input-event', (event, input) => {
-    const isDevToolsShortcut =
-      input.key === 'F12' ||
-      (input.control && input.shift && (input.key === 'I' || input.key === 'i'));
-    if (isDevToolsShortcut) {
-      mainWindow.webContents.toggleDevTools();
-    }
-  });
+  // DevTools shortcut: available in development mode, disabled in packaged production
+  const isDevMode = !app.isPackaged || process.argv.includes('--dev');
+  if (isDevMode) {
+    mainWindow.webContents.on('before-input-event', (event, input) => {
+      const isDevToolsShortcut =
+        input.key === 'F12' ||
+        (input.control && input.shift && (input.key === 'I' || input.key === 'i'));
+      if (isDevToolsShortcut) {
+        mainWindow.webContents.toggleDevTools();
+      }
+    });
+  }
 
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
@@ -147,6 +248,7 @@ function createMainWindow(startPage = 'index.html') {
     mainWindow.hide();
   });
 }
+
 
 function createWidgetWindow() {
   if (widgetWindow) { widgetWindow.show(); return; }
@@ -170,12 +272,16 @@ function createWidgetWindow() {
     }
   });
 
+  // Widget only loads local renderer files — no CDN script sources needed.
+  _attachCsp(widgetWindow);
+
   widgetWindow.loadFile(path.join(__dirname, '../renderer/widget.html'));
 
   widgetWindow.on('closed', () => {
     widgetWindow = null;
   });
 }
+
 
 // ═══════════════════════════════════════════════════════════════════════
 // SYSTEM TRAY
@@ -216,6 +322,7 @@ function setupIPC() {
     try {
       const user = db.userRepository.register(fullName, email, password);
       currentUser = user;
+      if (db) db.setActiveUser(user.id);
       sessionManager.createSession(user.id);
       logger.authEvent('register + auto-login', user.id);
       mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
@@ -230,15 +337,12 @@ function setupIPC() {
     try {
       const user = db.userRepository.verifyLogin(email, password);
       currentUser = user;
+      if (db) db.setActiveUser(user.id);
       sessionManager.createSession(user.id);
       logger.authEvent('login', user.id);
       mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
       return { success: true, user };
     } catch (err) {
-      // Deliberately do NOT logger.ipcError here with full err — the
-      // message is already the safe, generic "Invalid email or password."
-      // and we don't want repeated failed attempts to spam the log with
-      // enough detail to fingerprint account existence.
       logger.authEvent('login failed');
       return { success: false, error: err.message };
     }
@@ -247,6 +351,7 @@ function setupIPC() {
   ipcMain.handle('auth-logout', () => {
     logger.authEvent('logout', currentUser?.id);
     currentUser = null;
+    if (db) db.setActiveUser(null);
     sessionManager.clearSession();
     widgetWindow?.close();
     mainWindow.loadFile(path.join(__dirname, '../renderer/login.html'));
@@ -256,6 +361,28 @@ function setupIPC() {
   ipcMain.handle('auth-get-current-user', () => {
     if (!currentUser) return { success: false, error: 'Not signed in.' };
     return { success: true, user: currentUser };
+  });
+
+  ipcMain.handle('set-active-user', (e, user) => {
+    try {
+      currentUser = user;
+      if (db) db.setActiveUser(user ? (user.id || user.user_id) : null);
+      return { success: true };
+    } catch (err) {
+      logger.ipcError('set-active-user', err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('clear-active-user', () => {
+    try {
+      currentUser = null;
+      if (db) db.setActiveUser(null);
+      return { success: true };
+    } catch (err) {
+      logger.ipcError('clear-active-user', err);
+      return { success: false, error: err.message };
+    }
   });
 
   // ─── FastAPI Session Token Bridge (Phase 2) ───────────────────────
@@ -307,13 +434,41 @@ function setupIPC() {
     }
   });
 
+  // ─── Page Navigation Bridge (Phase 2 — used by AuthGateway) ──────────
+  // AuthGateway calls these AFTER a successful FastAPI login/logout so the
+  // main process (the only process allowed to call loadFile) can switch pages.
+  ipcMain.handle('navigate-to-main', () => {
+    try {
+      mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
+      return { success: true };
+    } catch (err) {
+      logger.ipcError('navigate-to-main', err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('navigate-to-login', () => {
+    try {
+      widgetWindow?.close();
+      mainWindow.loadFile(path.join(__dirname, '../renderer/login.html'));
+      return { success: true };
+    } catch (err) {
+      logger.ipcError('navigate-to-login', err);
+      return { success: false, error: err.message };
+    }
+  });
+
   // ─── Backend Ping (connectivity check) ────────────────────────────
   // Returns true if the FastAPI backend responds to /health.
+  // URL is configurable via STUDYFLOW_BACKEND_URL for production builds.
   ipcMain.handle('backend-ping', async () => {
-    const https = require('https');
     const http  = require('http');
+    const https = require('https');
+    const backendBase = process.env.STUDYFLOW_BACKEND_URL || 'http://127.0.0.1:8000';
+    const healthUrl   = `${backendBase.replace(/\/+$/, '')}/health`;
+    const lib = healthUrl.startsWith('https') ? https : http;
     return new Promise((resolve) => {
-      const req = http.get('http://127.0.0.1:8000/health', { timeout: 3000 }, (res) => {
+      const req = lib.get(healthUrl, { timeout: 3000 }, (res) => {
         resolve({ available: res.statusCode === 200 });
       });
       req.on('error', () => resolve({ available: false }));
@@ -330,11 +485,14 @@ function setupIPC() {
   // generic `db` bridge, now applied uniformly to every other channel.
   const PUBLIC_CHANNELS = new Set([
     'auth-register', 'auth-login', 'auth-logout', 'auth-get-current-user',
+    'set-active-user', 'clear-active-user',
     'window-minimize', 'window-maximize', 'window-close',
     // Phase 2 — FastAPI session token bridge (must be public: needed before local auth)
     'session-token-save', 'session-token-load', 'session-token-clear',
     // Phase 2 — backend health check (used by SyncManager offline detection)
     'backend-ping',
+    // Phase 2 — page navigation after FastAPI auth (must be public: no local session yet)
+    'navigate-to-main', 'navigate-to-login',
   ]);
   const rawHandle = ipcMain.handle.bind(ipcMain);
   ipcMain.handle = (channel, listener) => {
@@ -1345,15 +1503,6 @@ function setupIPC() {
     } catch (err) {
       logger.ipcError('onboarding-chat', err);
       return { success: false, error: err.message };
-    }
-  });
-
-  ipcMain.handle('test-provider-key', async (e, provider, keyOverride) => {
-    try {
-      return await aiProvider.testKey(provider, keyOverride);
-    } catch (err) {
-      logger.ipcError('test-provider-key', err);
-      return { success: false, message: 'Something went wrong testing this key.' };
     }
   });
 }

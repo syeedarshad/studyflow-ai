@@ -22,7 +22,7 @@ POST   /api/v1/auth/reset-password    Complete password reset
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth.dependencies import CurrentAuth, require_auth
@@ -45,9 +45,13 @@ from app.api.auth.schemas import (
     VerifyOTPRequest,
 )
 from app.api.auth.service import AuthService
+from core.config import get_settings
+from core.limiter import limiter
 from database.base import get_db
+from services.email_service import EmailService
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
@@ -70,9 +74,11 @@ def _get_ip(request: Request) -> Optional[str]:
     summary="Register a new account",
     responses={409: {"model": ErrorResponse}},
 )
+@limiter.limit(f"{settings.AUTH_RATE_LIMIT_PER_MINUTE}/minute")
 async def register(
     body: RegisterRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ) -> RegisterResponse:
     """
@@ -82,13 +88,22 @@ async def register(
     """
     service = AuthService(db)
     device_label = request.headers.get("X-Device-Label")
-    user, token = await service.register(
+    user, token, otp = await service.register(
         full_name=body.full_name,
         email=body.email,
         password=body.password,
         device_label=device_label,
         ip_address=_get_ip(request),
     )
+
+    # Queue verification email dispatch asynchronously
+    email_service = EmailService()
+    background_tasks.add_task(
+        email_service.send_verification_email,
+        email_to=user.email,
+        otp_code=otp,
+    )
+
     return RegisterResponse(
         user=UserPublic.model_validate(user),
         session_token=token,
@@ -107,6 +122,7 @@ async def register(
     summary="Sign in with email and password",
     responses={401: {"model": ErrorResponse}, 403: {"model": ErrorResponse}},
 )
+@limiter.limit(f"{settings.AUTH_RATE_LIMIT_PER_MINUTE}/minute")
 async def login(
     body: LoginRequest,
     request: Request,
@@ -236,8 +252,10 @@ async def logout_all(
     summary="Verify email or password-reset OTP",
     responses={400: {"model": ErrorResponse}},
 )
+@limiter.limit(f"{settings.AUTH_RATE_LIMIT_PER_MINUTE}/minute")
 async def verify_otp(
     body: VerifyOTPRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> OTPResponse:
     service = AuthService(db)
@@ -261,14 +279,16 @@ async def verify_otp(
     response_model=OTPResponse,
     summary="Re-send OTP (email verification)",
 )
+@limiter.limit(f"{settings.AUTH_RATE_LIMIT_PER_MINUTE}/minute")
 async def resend_otp(
     body: ResendOTPRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ) -> OTPResponse:
     """
-    Issues a fresh OTP. The actual email dispatch is handled by the email service
-    (plugged in via the service layer — the endpoint itself only triggers it).
-    We always return success to avoid revealing whether the email is registered.
+    Issues a fresh OTP and dispatches verification email via BackgroundTasks.
+    Always returns success to avoid revealing whether the email is registered.
     """
     from app.api.auth.repository import UserRepository
     users = UserRepository(db)
@@ -276,8 +296,13 @@ async def resend_otp(
     if user:
         service = AuthService(db)
         otp = await service.send_verification_otp(user.id)
-        # TODO: send email with otp (Phase 2 email integration)
-        logger.info("Resend OTP for user_id=%s purpose=%s", user.id, body.purpose)
+        email_service = EmailService()
+        background_tasks.add_task(
+            email_service.send_verification_email,
+            email_to=user.email,
+            otp_code=otp,
+        )
+        logger.info("Resend OTP triggered for user_id=%s purpose=%s", user.id, body.purpose)
 
     return OTPResponse(
         message="If that email is registered, a new code has been sent."
@@ -291,19 +316,27 @@ async def resend_otp(
     response_model=OTPResponse,
     summary="Trigger password-reset OTP email",
 )
+@limiter.limit(f"{settings.AUTH_RATE_LIMIT_PER_MINUTE}/minute")
 async def forgot_password(
     body: ForgotPasswordRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ) -> OTPResponse:
     """
-    Sends a password-reset OTP to the registered email.
+    Sends a password-reset OTP to the registered email via BackgroundTasks.
     Always returns success to avoid email enumeration.
     """
     service = AuthService(db)
     otp = await service.send_password_reset_otp(body.email)
     if otp:
-        # TODO: send email with otp (Phase 2 email integration)
-        logger.info("Password reset OTP for %s", body.email)
+        email_service = EmailService()
+        background_tasks.add_task(
+            email_service.send_password_reset_email,
+            email_to=body.email,
+            otp_code=otp,
+        )
+        logger.info("Password reset requested for email_hash=%s", hash(body.email))
 
     return OTPResponse(
         message="If that email is registered, a reset code has been sent."
@@ -318,8 +351,10 @@ async def forgot_password(
     summary="Complete password reset with OTP",
     responses={400: {"model": ErrorResponse}},
 )
+@limiter.limit(f"{settings.AUTH_RATE_LIMIT_PER_MINUTE}/minute")
 async def reset_password(
     body: ResetPasswordRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> PasswordResetResponse:
     service = AuthService(db)

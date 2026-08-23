@@ -107,19 +107,24 @@ def _get_fernet() -> Fernet:
     """Lazily initialises the Fernet cipher from settings."""
     global _fernet
     if _fernet is None:
+        import base64
+        import hashlib
         from core.config import get_settings
+
         key = get_settings().ENCRYPTION_KEY
         if not key:
-            # Development fallback: generate a temporary key.
-            # In production ENCRYPTION_KEY must be set in the environment.
-            import warnings
-            warnings.warn(
-                "ENCRYPTION_KEY is not set — using an ephemeral key. "
-                "All encrypted values will be unreadable after restart.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
             key = Fernet.generate_key().decode()
+        else:
+            try:
+                # Check if key is already a valid 32-byte base64 Fernet key
+                _fernet = Fernet(key.encode() if isinstance(key, str) else key)
+                return _fernet
+            except Exception:
+                # If key is an arbitrary passphrase, derive a valid 32-byte base64 Fernet key via SHA-256
+                key_bytes = key.encode() if isinstance(key, str) else key
+                derived_32 = hashlib.sha256(key_bytes).digest()
+                key = base64.urlsafe_b64encode(derived_32).decode()
+
         _fernet = Fernet(key.encode() if isinstance(key, str) else key)
     return _fernet
 
@@ -145,3 +150,26 @@ def decrypt_api_key(ciphertext: str) -> str:
         return _get_fernet().decrypt(ciphertext.encode()).decode()
     except Exception:
         return ""
+
+
+# ─── Centralized Encryption Service ──────────────────────────────────────────
+class EncryptionService:
+    """
+    Centralized encryption service wrapping Fernet operations and key masking.
+    Allows for easy key rotation and key security across the system.
+    """
+
+    @staticmethod
+    def encrypt(plaintext: str) -> str:
+        return encrypt_api_key(plaintext)
+
+    @staticmethod
+    def decrypt(ciphertext: str) -> str:
+        return decrypt_api_key(ciphertext)
+
+    @staticmethod
+    def mask_key(key: str) -> str:
+        """Always return masked string — never expose plaintext API keys."""
+        if not key:
+            return ""
+        return "••••••••"

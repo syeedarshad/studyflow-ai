@@ -12,7 +12,6 @@
 
 'use strict';
 
-const api = require('./api-client');
 
 const AiAPI = {
   /** Send a message to the AI Coach chat. */
@@ -99,6 +98,4 @@ const AiAPI = {
   },
 };
 
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = AiAPI;
-}
+// window.AiAPI = AiAPI;  // expose if needed via <script> tag

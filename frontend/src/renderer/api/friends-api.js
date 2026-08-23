@@ -2,7 +2,6 @@
  * StudyFlow AI — Friends API  (Phase 4 stub)
  */
 'use strict';
-const api = require('./api-client');
 const FriendsAPI = {
   async search(query)           { return api.get(`/friends/search?q=${encodeURIComponent(query)}`); },
   async getAll()                { return api.get('/friends'); },
@@ -17,4 +16,4 @@ const FriendsAPI = {
   async getMutualFriends(userId){ return api.get(`/friends/${userId}/mutual`); },
   async getOnlineStatus()       { return api.get('/friends/online-status'); },
 };
-if (typeof module !== 'undefined' && module.exports) module.exports = FriendsAPI;
+// window.FriendsAPI = FriendsAPI;  // expose if needed via <script> tag

@@ -133,10 +133,12 @@ class SessionRepository:
 
     async def get_active_for_user(self, user_id: int) -> list[Session]:
         result = await self.db.execute(
-            select(Session).where(
+            select(Session)
+            .where(
                 Session.user_id == user_id,
                 Session.is_active == True,  # noqa: E712
             )
+            .order_by(Session.created_at.asc(), Session.id.asc())
         )
         return list(result.scalars().all())
 

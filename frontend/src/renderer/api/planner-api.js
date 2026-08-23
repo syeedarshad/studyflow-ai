@@ -4,7 +4,6 @@
  */
 'use strict';
 
-const api = require('./api-client');
 
 const PlannerAPI = {
   async getTasks(date) {
@@ -49,4 +48,4 @@ const PlannerAPI = {
   },
 };
 
-if (typeof module !== 'undefined' && module.exports) module.exports = PlannerAPI;
+// window.PlannerAPI = PlannerAPI;  // expose if needed via <script> tag

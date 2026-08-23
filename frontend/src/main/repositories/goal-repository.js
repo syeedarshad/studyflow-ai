@@ -5,67 +5,88 @@ const { normalizeGoalTitle } = require('../utils');
 class GoalRepository {
   constructor(db) {
     this.db = db;
+    this.activeUserId = null;
+  }
+
+  setActiveUser(userId) {
+    this.activeUserId = userId !== undefined && userId !== null ? userId : null;
   }
 
   addGoal(goal) {
+    const uid = this.activeUserId;
+    if (uid === null) return null;
+
     goal.title = (goal.title || '').trim();
     const normalized = normalizeGoalTitle(goal.title);
 
-    // Prevent duplicate active goals
+    // Prevent duplicate active goals for the same user
     const existing = this.db.prepare(`
       SELECT * FROM goals 
-      WHERE normalized_title = @normalized AND status = 'active'
-    `).get({ normalized });
+      WHERE normalized_title = @normalized AND status = 'active' AND user_id = @uid
+    `).get({ normalized, uid });
 
     if (existing) {
       return { ...existing, isDuplicate: true };
     }
 
     const result = this.db.prepare(`
-      INSERT INTO goals (title, normalized_title, description, goal_type, target_date, status, progress_percentage)
-      VALUES (@title, @normalized, @description, @goal_type, @target_date, 'active', 0)
+      INSERT INTO goals (title, normalized_title, description, goal_type, target_date, status, progress_percentage, user_id)
+      VALUES (@title, @normalized, @description, @goal_type, @target_date, 'active', 0, @uid)
     `).run({ 
       title: goal.title, 
       normalized,
-      description: goal.description||'', 
-      goal_type: goal.goal_type||'custom', 
-      target_date: goal.target_date||null 
+      description: goal.description || '', 
+      goal_type: goal.goal_type || 'custom', 
+      target_date: goal.target_date || null,
+      uid
     });
     return this.getGoal(result.lastInsertRowid);
   }
 
   getGoal(id) {
-    return this.db.prepare('SELECT * FROM goals WHERE id=?').get(id);
+    const uid = this.activeUserId;
+    if (uid === null) return null;
+    return this.db.prepare('SELECT * FROM goals WHERE id = ? AND user_id = ?').get(id, uid);
   }
 
   getGoals(filter = {}) {
-    let sql = `SELECT * FROM goals WHERE status != 'deleted'`;
-    const params = [];
-    if (filter.status) { sql += ' AND status=?'; params.push(filter.status); }
+    const uid = this.activeUserId;
+    if (uid === null) return [];
+    let sql = `SELECT * FROM goals WHERE status != 'deleted' AND user_id = ?`;
+    const params = [uid];
+    if (filter.status) { sql += ' AND status = ?'; params.push(filter.status); }
     sql += ' ORDER BY created_at DESC';
     return this.db.prepare(sql).all(...params).map(g => ({ ...g, ...this.computeGoalInsights(g) }));
   }
 
   updateGoal(id, updates) {
+    const uid = this.activeUserId;
+    if (uid === null) return null;
     const allowed = ['title','description','goal_type','target_date','status','progress_percentage'];
     const fields  = Object.keys(updates).filter(k => allowed.includes(k));
     if (!fields.length) return null;
     const setClause = fields.map(k => `${k}=@${k}`).join(', ');
     const params    = {};
     fields.forEach(k => { params[k] = updates[k]; });
-    return this.db.prepare(`UPDATE goals SET ${setClause}, updated_at=datetime('now') WHERE id=@id`).run({ ...params, id });
+    return this.db.prepare(`UPDATE goals SET ${setClause}, updated_at=datetime('now') WHERE id=@id AND user_id=@uid`).run({ ...params, id, uid });
   }
 
   deleteGoal(id) {
-    return this.db.prepare(`UPDATE goals SET status='deleted', updated_at=datetime('now') WHERE id=?`).run(id);
+    const uid = this.activeUserId;
+    if (uid === null) return null;
+    return this.db.prepare(`UPDATE goals SET status='deleted', updated_at=datetime('now') WHERE id=? AND user_id=?`).run(id, uid);
   }
 
   getTasksForGoal(goalId) {
-    return this.db.prepare(`SELECT * FROM tasks WHERE goal_id=? AND status != 'deleted' ORDER BY due_date ASC`).all(goalId);
+    const uid = this.activeUserId;
+    if (uid === null) return [];
+    return this.db.prepare(`SELECT * FROM tasks WHERE goal_id=? AND status != 'deleted' AND user_id=? ORDER BY due_date ASC`).all(goalId, uid);
   }
 
   getQuestsForGoal(goalId) {
-    return this.db.prepare('SELECT * FROM daily_quests WHERE goal_id=? ORDER BY date ASC').all(goalId);
+    const uid = this.activeUserId;
+    if (uid === null) return [];
+    return this.db.prepare('SELECT * FROM daily_quests WHERE goal_id=? AND user_id=? ORDER BY date ASC').all(goalId, uid);
   }
 
   computeGoalInsights(goal) {

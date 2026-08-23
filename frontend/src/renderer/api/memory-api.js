@@ -4,7 +4,6 @@
  */
 'use strict';
 
-const api = require('./api-client');
 
 const MemoryAPI = {
   async getAll() {
@@ -21,4 +20,4 @@ const MemoryAPI = {
   },
 };
 
-if (typeof module !== 'undefined' && module.exports) module.exports = MemoryAPI;
+// window.MemoryAPI = MemoryAPI;  // expose if needed via <script> tag

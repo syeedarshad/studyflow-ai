@@ -1,0 +1,3 @@
+"""
+StudyFlow AI — Profile Module
+"""

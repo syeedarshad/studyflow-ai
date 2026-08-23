@@ -3,8 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy"
-    content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:;">
+  <!-- Content-Security-Policy is injected dynamically by main.js (_attachCsp)
+       using STUDYFLOW_BACKEND_URL. Do NOT add a static CSP meta tag here —
+       it would be overwritten by the main-process header and could
+       accidentally hardcode localhost for a production build. -->
   <title>StudyFlow AI</title>
   <link rel="stylesheet" href="styles/main.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js" defer></script>
@@ -112,11 +114,11 @@
       </div>
       <div class="profile-dropdown" id="profile-dropdown">
         <button class="profile-dropdown-item" data-action="navigateTo" data-page="profile">👤 My Profile</button>
-        <button class="profile-dropdown-item" data-action="navigateTo" data-page="settings">⚙️ Account Settings</button>
-        <button class="profile-dropdown-item" data-action="navigateTo" data-page="settings">🧠 Memory</button>
-        <button class="profile-dropdown-item" data-action="navigateTo" data-page="settings">📚 Study Preferences</button>
+        <button class="profile-dropdown-item" data-action="navigateTo" data-page="settings" data-section="account">⚙️ Account Settings</button>
+        <button class="profile-dropdown-item" data-action="navigateTo" data-page="settings" data-section="memory">🧠 Memory</button>
+        <button class="profile-dropdown-item" data-action="navigateTo" data-page="settings" data-section="preferences">📚 Study Preferences</button>
         <button class="profile-dropdown-item" data-action="navigateTo" data-page="planner">🗓️ Planner</button>
-        <button class="profile-dropdown-item" data-action="navigateTo" data-page="settings">🎨 Theme</button>
+        <button class="profile-dropdown-item" data-action="navigateTo" data-page="settings" data-section="theme">🎨 Theme</button>
         <button class="profile-dropdown-item" disabled title="Not built yet — no notification preferences exist beyond the OS-level task alerts already in the app">🔔 Notifications <span class="profile-dropdown-badge">Soon</span></button>
         <button class="profile-dropdown-item" disabled title="Cloud sync isn't available yet — StudyFlow AI is local-only for now">☁️ Sync <span class="profile-dropdown-badge">Soon</span></button>
         <button class="profile-dropdown-item" data-action="showHelp">❓ Help</button>
@@ -163,6 +165,24 @@
 <!-- ─── TOAST CONTAINER ──────────────────────────────────────── -->
 <div id="toast-container"></div>
 
+<script src="core/config.js"></script>
+<script src="core/logger.js"></script>
+<script src="core/event-bus.js"></script>
+<script src="core/error-service.js"></script>
+<script src="api/api-client.js"></script>
+<script src="services/session-manager.js"></script>
+<script src="services/sync-manager.js"></script>
+<script src="api/auth-api.js"></script>
+<script src="services/auth-service.js"></script>
+<script src="gateways/auth-gateway.js"></script>
+<script src="api/profile-api.js"></script>
+<script src="api/provider-api.js"></script>
+<script src="api/usage-api.js"></script>
+<script src="api/tasks-api.js"></script>
+<script src="api/onboarding-api.js"></script>
+<script src="services/profile-service.js"></script>
+<script src="services/provider-service.js"></script>
+<script src="services/task-service.js"></script>
 <script src="app.js"></script>
 <script src="onboarding-coach.js"></script>
 </body>
