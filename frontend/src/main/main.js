@@ -16,8 +16,33 @@ const {
   nativeImage, Notification, screen, session
 } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const logger = require('./logger');
 const sessionManager = require('./session-manager');
+
+// Ensure Windows taskbar grouping, shortcuts, and notifications match App ID
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.studyflow.ai');
+}
+
+/**
+ * Resolves the application icon robustly across development and packaged builds.
+ * Uses .ico on Windows for crisp taskbar/Alt+Tab/window icons at all scales.
+ */
+function getAppIconPath() {
+  const icoRelative = path.join(__dirname, '../../assets/icons/icon.ico');
+  const pngRelative = path.join(__dirname, '../../assets/icons/icon.png');
+  const icoAppPath  = path.join(app.getAppPath(), 'assets/icons/icon.ico');
+  const pngAppPath  = path.join(app.getAppPath(), 'assets/icons/icon.png');
+
+  if (process.platform === 'win32') {
+    if (fs.existsSync(icoRelative)) return icoRelative;
+    if (fs.existsSync(icoAppPath))  return icoAppPath;
+  }
+  if (fs.existsSync(pngRelative)) return pngRelative;
+  if (fs.existsSync(pngAppPath))  return pngAppPath;
+  return icoRelative;
+}
 
 let Database;
 try {
@@ -204,6 +229,7 @@ function _attachCsp(win, extraScriptSrc = '') {
 // ──────────────────────────────────────────────────────────────────────────────
 
 function createMainWindow(startPage = 'index.html') {
+  const iconPath = getAppIconPath();
   mainWindow = new BrowserWindow({
     width:           1280,
     height:          800,
@@ -213,6 +239,7 @@ function createMainWindow(startPage = 'index.html') {
     titleBarStyle:   'hiddenInset',
     frame:           false,
     show:            false,
+    icon:            iconPath,
     webPreferences: {
       preload:          path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -265,6 +292,7 @@ function createWidgetWindow() {
     resizable:      false,
     transparent:    true,
     skipTaskbar:    true,
+    icon:           getAppIconPath(),
     webPreferences: {
       preload:          path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -288,10 +316,14 @@ function createWidgetWindow() {
 // ═══════════════════════════════════════════════════════════════════════
 
 function createTray() {
-  const iconPath = path.join(__dirname, '../../assets/icons/icon.png');
+  const iconPath = getAppIconPath();
   let icon;
   try {
     icon = nativeImage.createFromPath(iconPath);
+    if (icon.isEmpty()) {
+      const pngPath = path.join(__dirname, '../../assets/icons/icon.png');
+      icon = nativeImage.createFromPath(pngPath);
+    }
     if (icon.isEmpty()) icon = nativeImage.createEmpty();
   } catch {
     icon = nativeImage.createEmpty();

@@ -75,3 +75,23 @@ async def test_security_headers_on_auth_endpoint(async_client):
     assert headers.get("x-content-type-options") == "nosniff"
     assert headers.get("x-frame-options") == "DENY"
     assert headers.get("referrer-policy") == "no-referrer"
+
+
+# ── API Documentation Settings ───────────────────────────────────────────────
+
+def test_docs_enabled_behavior():
+    """Verify is_docs_enabled property behavior across environments and overrides."""
+    from core.config import Settings
+
+    # Dev and Staging enabled by default
+    assert Settings(ENVIRONMENT="development").is_docs_enabled is True
+    assert Settings(ENVIRONMENT="staging").is_docs_enabled is True
+
+    # Production disabled by default
+    assert Settings(ENVIRONMENT="production").is_docs_enabled is False
+
+    # Explicit ENABLE_API_DOCS overrides default behavior
+    assert Settings(ENVIRONMENT="production", ENABLE_API_DOCS=True).is_docs_enabled is True
+    assert Settings(ENVIRONMENT="development", ENABLE_API_DOCS=False).is_docs_enabled is False
+    assert Settings(ENVIRONMENT="staging", ENABLE_API_DOCS=False).is_docs_enabled is False
+

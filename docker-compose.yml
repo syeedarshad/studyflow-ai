@@ -46,6 +46,7 @@ services:
     environment:
       ENVIRONMENT:       ${ENVIRONMENT:-staging}
       DEBUG:             ${DEBUG:-false}
+      ENABLE_API_DOCS:   ${ENABLE_API_DOCS:-}
       DATABASE_URL:      postgresql+asyncpg://${POSTGRES_USER:-studyflow}:${POSTGRES_PASSWORD:-CHANGE_ME}@db:5432/${POSTGRES_DB:-studyflow_ai}
       DATABASE_SYNC_URL: postgresql+psycopg2://${POSTGRES_USER:-studyflow}:${POSTGRES_PASSWORD:-CHANGE_ME}@db:5432/${POSTGRES_DB:-studyflow_ai}
       ENCRYPTION_KEY:    ${ENCRYPTION_KEY}

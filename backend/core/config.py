@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     APP_VERSION: str = "2.0.0"
     DEBUG: bool = False
     ENVIRONMENT: str = "production"  # development | staging | production
+    ENABLE_API_DOCS: Optional[bool] = None
 
     # ─── Server ───────────────────────────────────────────────────────────────
     HOST: str = "127.0.0.1"
@@ -111,6 +112,18 @@ class Settings(BaseSettings):
     @property
     def is_development(self) -> bool:
         return self.ENVIRONMENT.lower() == "development"
+
+    @property
+    def is_docs_enabled(self) -> bool:
+        """
+        Controls whether OpenAPI documentation (/docs, /redoc, /openapi.json) is enabled.
+        - If ENABLE_API_DOCS is explicitly set (True or False), that value is always respected.
+        - Otherwise, enabled by default in development and staging environments.
+        - Disabled by default in production for security.
+        """
+        if self.ENABLE_API_DOCS is not None:
+            return self.ENABLE_API_DOCS
+        return self.ENVIRONMENT.lower() in ("development", "staging")
 
     @property
     def max_upload_bytes(self) -> int:

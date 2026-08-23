@@ -78,9 +78,9 @@ app = FastAPI(
         "StudyFlow AI Platform API — the backend brain powering the "
         "StudyFlow AI desktop application."
     ),
-    docs_url="/docs" if settings.is_development else None,
-    redoc_url="/redoc" if settings.is_development else None,
-    openapi_url="/openapi.json" if settings.is_development else None,
+    docs_url="/docs" if settings.is_docs_enabled else None,
+    redoc_url="/redoc" if settings.is_docs_enabled else None,
+    openapi_url="/openapi.json" if settings.is_docs_enabled else None,
     lifespan=lifespan,
 )
 
@@ -332,7 +332,7 @@ app.include_router(onboarding_router, prefix="/api/v1")
 # ▸ The override only runs when /openapi.json is fetched (i.e. when Swagger UI
 #   loads), never on any real API request.
 
-if settings.is_development:
+if settings.is_docs_enabled:
     from fastapi.openapi.utils import get_openapi
 
     # Paths that require a valid Bearer session token.
