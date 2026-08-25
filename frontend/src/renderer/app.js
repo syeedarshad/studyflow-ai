@@ -125,7 +125,14 @@ const ACTION_MAP = {
   saveEditNote:            (noteId) => saveEditNote(noteId),
   updateWellness:          (field, value) => updateWellness(field, value),
   setTheme:                (theme) => setTheme(theme),
-  setPlannerTimeNow:       () => setPlannerTimeNow(),
+  showExamCreateModal:     () => showExamCreateModal(),
+  startSavedSession:       (sessionId) => startSavedSession(sessionId),
+  deleteSavedSession:      (sessionId) => deleteSavedSession(sessionId),
+  setQuickSessionTemplate: (template) => { const el = document.getElementById('qs-input'); if (el) el.value = template; },
+  removeTaskPlanItem:      (idx) => removeTaskPlanItem(idx),
+  addTaskPlanItem:         () => addTaskPlanItem(),
+  removeSchedPlanItem:     (idx) => removeSchedPlanItem(idx),
+  addSchedPlanItem:        () => addSchedPlanItem(),
   showEditProfileModal:    () => showEditProfileModal(),
   saveProfile:             () => saveProfile(),
 };
@@ -162,6 +169,11 @@ function collectActionArgs(el, action) {
     case 'rejectExamPlanCancel': return [Number(d.planId)];
     case 'acceptExamPlan': return [Number(d.planId)];
     case 'deleteTimeBlock': return [Number(d.blockId)];
+    case 'startSavedSession': return [Number(d.sessionId)];
+    case 'deleteSavedSession': return [Number(d.sessionId)];
+    case 'setQuickSessionTemplate': return [d.template || ''];
+    case 'removeTaskPlanItem': return [Number(d.idx)];
+    case 'removeSchedPlanItem': return [Number(d.idx)];
     case 'deleteSemester': return [Number(d.semesterId)];
     case 'rejectSemesterPlan': return [Number(d.planId)];
     case 'rejectSemesterPlanCancel': return [Number(d.planId)];
@@ -492,8 +504,10 @@ function applyTheme(theme) {
 
 // ─── Provider label helper (Offline Mode badge) ───────────────────────────────
 function formatProviderLabel(provider) {
-  if (provider === 'offline' || provider === 'local') return '🌐 Offline Mode';
-  return `via ${provider}`;
+  const clean = (provider || '').toLowerCase().trim();
+  if (clean === 'gemini') return 'with Gemini';
+  if (clean === 'groq') return 'with Groq fallback';
+  return 'offline';
 }
 
 // ─── Greeting helpers ──────────────────────────────────────────────────────────────
@@ -1120,8 +1134,54 @@ async function generateTaskPlanPreview(prompt, btn) {
   finally { if (btn) { btn.disabled = false; btn.textContent = '✨ Generate Tasks'; } }
 }
 
+function updatePlanPreviewSummary() {
+  const rows = document.querySelectorAll('.plan-preview-item.editable');
+  let totalMinutes = 0;
+  rows.forEach(r => {
+    const dur = parseInt(r.querySelector('.plan-item-duration')?.value, 10) || 30;
+    totalMinutes += dur;
+  });
+  const hours = Math.floor(totalMinutes / 60);
+  const mins = totalMinutes % 60;
+  const timeEl = document.getElementById('pp-stat-time');
+  if (timeEl) timeEl.textContent = `${hours}h ${mins}m`;
+  const countEl = document.getElementById('pp-stat-count');
+  if (countEl) countEl.textContent = String(rows.length);
+  const acceptBtn = document.querySelector('button[data-action="acceptPlan"]');
+  if (acceptBtn) acceptBtn.textContent = `✓ Accept & Add ${rows.length} Task${rows.length > 1 ? 's' : ''}`;
+}
+
+function removeTaskPlanItem(idx) {
+  const row = document.querySelector(`.plan-preview-item[data-idx="${idx}"]`);
+  if (row) row.remove();
+  updatePlanPreviewSummary();
+}
+
+function addTaskPlanItem() {
+  const list = document.querySelector('.plan-preview-list');
+  if (!list) return;
+  const newIdx = Date.now();
+  const itemHtml = `
+    <div class="plan-preview-item editable" data-idx="${newIdx}" style="display:flex;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
+      <select class="form-select plan-item-category" style="width:110px;padding:4px 6px;font-size:12px">
+        ${CATEGORIES.map(c => `<option value="${c}">${c}</option>`).join('')}
+      </select>
+      <input class="form-input plan-item-title" value="New Task" placeholder="Task title" style="flex:1;padding:4px 8px;font-size:13px">
+      <input class="form-input plan-item-duration" type="number" value="30" min="5" max="240" style="width:65px;padding:4px 6px;font-size:12px" title="Duration in minutes">m
+      <select class="form-select plan-item-priority" style="width:85px;padding:4px 6px;font-size:12px">
+        <option value="high">High</option>
+        <option value="medium" selected>Medium</option>
+        <option value="low">Low</option>
+      </select>
+      <button class="btn btn-ghost btn-sm" data-action="removeTaskPlanItem" data-idx="${newIdx}" style="color:var(--danger);padding:4px 8px" title="Remove task">✕</button>
+    </div>
+  `;
+  list.insertAdjacentHTML('beforeend', itemHtml);
+  updatePlanPreviewSummary();
+}
+
 function showTaskPlanApproval(plan, originalPrompt) {
-  const tasks        = plan.payload;
+  const tasks        = plan.payload || [];
   const totalMinutes = tasks.reduce((s, t) => s + (t.estimated_minutes || 30), 0);
   const hours        = Math.floor(totalMinutes / 60);
   const mins         = totalMinutes % 60;
@@ -1135,41 +1195,45 @@ function showTaskPlanApproval(plan, originalPrompt) {
   const focusScore = Math.min(100, Math.round(workloadF * 0.7) + priorityF);
 
   const itemsHtml = tasks.map((t, i) => `
-    <div class="plan-preview-item" data-idx="${i}">
-      <span class="task-category cat-${t.category.toLowerCase().replace(/\s+/g,'_')}" style="font-size:10px">${t.category}</span>
-      <span class="pp-title">${escapeHTML(t.title)}</span>
-      <span class="pp-meta">${t.estimated_minutes||30}m · ${t.priority} · ${formatDate(t.due_date)}</span>
+    <div class="plan-preview-item editable" data-idx="${i}" style="display:flex;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
+      <select class="form-select plan-item-category" style="width:110px;padding:4px 6px;font-size:12px">
+        ${CATEGORIES.map(c => `<option value="${c}" ${c === t.category ? 'selected' : ''}>${c}</option>`).join('')}
+      </select>
+      <input class="form-input plan-item-title" value="${escapeHTML(t.title)}" placeholder="Task title" style="flex:1;padding:4px 8px;font-size:13px">
+      <input class="form-input plan-item-duration" type="number" value="${t.estimated_minutes || 30}" min="5" max="240" style="width:65px;padding:4px 6px;font-size:12px" title="Duration in minutes">m
+      <select class="form-select plan-item-priority" style="width:85px;padding:4px 6px;font-size:12px">
+        <option value="high" ${t.priority === 'high' ? 'selected' : ''}>High</option>
+        <option value="medium" ${t.priority === 'medium' || !t.priority ? 'selected' : ''}>Medium</option>
+        <option value="low" ${t.priority === 'low' ? 'selected' : ''}>Low</option>
+      </select>
+      <button class="btn btn-ghost btn-sm" data-action="removeTaskPlanItem" data-idx="${i}" style="color:var(--danger);padding:4px 8px" title="Remove task">✕</button>
     </div>
   `).join('');
-
-  const catTagsHtml = Object.entries(categoryCounts).map(([cat, count]) => `
-    <span class="task-category cat-${cat.toLowerCase().replace(/\s+/g,'_')}" style="font-size:11px">${cat} ×${count}</span>
-  `).join(' ');
 
   showModal('🤖 AI Plan Preview', `
     <div class="ai-thinking" style="margin-bottom:10px">
       <span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span>
-      <span style="margin-left:4px">Generated ${formatProviderLabel(plan.provider)} — review before adding</span>
+      <span style="margin-left:4px">Generated ${formatProviderLabel(plan.provider)} — customize before adding</span>
     </div>
     <div class="grid-3" style="gap:10px;margin-bottom:14px">
       <div class="stat-card" style="padding:12px">
         <div class="stat-label">Est. Study Time</div>
-        <div class="stat-value" style="font-size:20px">${hours}h ${mins}m</div>
+        <div class="stat-value" id="pp-stat-time" style="font-size:20px">${hours}h ${mins}m</div>
       </div>
       <div class="stat-card accent-2" style="padding:12px">
         <div class="stat-label">Tasks</div>
-        <div class="stat-value" style="font-size:20px">${tasks.length}</div>
+        <div class="stat-value" id="pp-stat-count" style="font-size:20px">${tasks.length}</div>
       </div>
       <div class="stat-card accent-4" style="padding:12px">
         <div class="stat-label">Focus Score</div>
         <div class="stat-value" style="font-size:20px">${focusScore}</div>
       </div>
     </div>
-    <div style="margin-bottom:12px">
-      <div class="form-label" style="margin-bottom:6px">Category Breakdown</div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap">${catTagsHtml}</div>
+    <div style="font-size:12px;color:var(--text-3);margin-bottom:6px">Review and edit any task details below:</div>
+    <div class="plan-preview-list" style="max-height:280px;overflow-y:auto;margin-bottom:10px">${itemsHtml}</div>
+    <div style="margin-bottom:14px">
+      <button class="btn btn-ghost btn-sm" data-action="addTaskPlanItem">＋ Add Another Task</button>
     </div>
-    <div class="plan-preview-list">${itemsHtml}</div>
     <div class="plan-actions">
       <button class="btn btn-ghost" data-action="regeneratePlan" data-prompt="${escapeJS(originalPrompt)}">↺ Regenerate</button>
       <button class="btn btn-secondary" data-action="closeModal">Cancel</button>
@@ -1178,17 +1242,127 @@ function showTaskPlanApproval(plan, originalPrompt) {
   `);
 }
 
+let _isAcceptingPlan = false;
 async function acceptPlan(planId) {
+  if (_isAcceptingPlan) return;
+  _isAcceptingPlan = true;
+
+  const btn = document.querySelector(`button[data-action="acceptPlan"][data-plan-id="${planId}"]`) ||
+              document.querySelector('button[data-action="acceptPlan"]');
+  const originalText = btn ? btn.textContent : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '⏳ Saving...';
+  }
+
   try {
+    const taskRows = document.querySelectorAll('.plan-preview-item.editable');
+    const schedRows = document.querySelectorAll('.schedule-preview-item.editable');
+
+    let editedTasks = [];
+    if (taskRows.length > 0) {
+      taskRows.forEach(r => {
+        const title = r.querySelector('.plan-item-title')?.value.trim();
+        if (!title) return;
+        const category = r.querySelector('.plan-item-category')?.value || 'Revision';
+        const estimated_minutes = parseInt(r.querySelector('.plan-item-duration')?.value, 10) || 30;
+        const priority = r.querySelector('.plan-item-priority')?.value || 'medium';
+        editedTasks.push({
+          title,
+          category,
+          estimated_minutes,
+          priority,
+          due_date: new Date().toISOString().slice(0, 10),
+          notes: ''
+        });
+      });
+    }
+
+    let editedSchedule = [];
+    if (schedRows.length > 0) {
+      schedRows.forEach(r => {
+        const activity = r.querySelector('.sched-item-activity')?.value.trim();
+        if (!activity) return;
+        const time = r.querySelector('.sched-item-time')?.value || '18:00';
+        const duration = parseInt(r.querySelector('.sched-item-duration')?.value, 10) || 30;
+        const type = r.querySelector('.sched-item-type')?.value || 'study';
+        editedSchedule.push({ time, activity, duration, type });
+      });
+    }
+
     const res = await window.studyflow.planAccept(planId);
-    if (!res.success) { toast(res.error || 'Failed to apply plan', 'error'); return; }
-    toast(`✨ Plan applied — ${res.createdCount || 0} item(s) added`, 'success');
+    if (!res.success) {
+      toast(res.error || 'Failed to apply plan', 'error');
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
+      return;
+    }
+
+    const payload = editedTasks.length > 0 ? editedTasks : (res.plan?.payload || []);
+    let successCount = 0;
+    let failCount = 0;
+
+    if (editedTasks.length > 0 || (res.plan?.type === 'tasks' && Array.isArray(payload) && payload.length > 0)) {
+      if (window.TaskService) {
+        for (const t of payload) {
+          try {
+            const createRes = await window.TaskService.createTask({
+              title: t.title,
+              category: t.category,
+              priority: t.priority,
+              due_date: t.due_date,
+              estimated_minutes: t.estimated_minutes,
+              notes: t.notes
+            });
+            if (createRes && createRes.success) {
+              successCount++;
+            } else {
+              failCount++;
+              console.warn('[acceptPlan] Task creation failed:', createRes?.error || 'Unknown error');
+            }
+          } catch (taskErr) {
+            failCount++;
+            console.error('[acceptPlan] Task creation exception:', taskErr);
+          }
+        }
+      } else {
+        successCount = payload.length;
+      }
+
+      if (failCount === 0) {
+        toast(`✨ Plan applied — ${successCount} task${successCount === 1 ? '' : 's'} added!`, 'success');
+      } else if (successCount > 0) {
+        toast(`⚠️ ${successCount} of ${payload.length} tasks added successfully (${failCount} failed).`, 'warning');
+      } else {
+        toast('❌ Failed to add tasks to your task list.', 'error');
+      }
+    } else if (editedSchedule.length > 0 || res.plan?.type === 'schedule') {
+      const scheduleToSave = editedSchedule.length > 0 ? editedSchedule : (res.plan?.payload || []);
+      const todayStr = new Date().toISOString().slice(0, 10);
+      await window.studyflow.db('savePlan', todayStr, null, null, scheduleToSave);
+      toast(`✨ Schedule saved — ${scheduleToSave.length} block(s) added!`, 'success');
+    } else {
+      toast(`✨ Plan applied — ${res.createdCount || 0} item(s) added`, 'success');
+    }
+
     closeModal();
     await updateSidebarXP();
     if (App.currentPage === 'coach')         await navigateTo('coach');
     else if (App.currentPage === 'planner') await navigateTo('planner');
+    else if (App.currentPage === 'tasks')   await navigateTo('tasks');
     else                                     await navigateTo('dashboard');
-  } catch (err) { toast('Failed to apply the plan.', 'error'); }
+  } catch (err) {
+    console.error('[acceptPlan] Error applying plan:', err);
+    toast('Failed to apply the plan.', 'error');
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
+  } finally {
+    _isAcceptingPlan = false;
+  }
 }
 
 async function regeneratePlan(originalPrompt) {
@@ -2052,14 +2226,48 @@ async function runScheduleGeneration() {
   finally { btn.disabled = false; btn.textContent = '✨ Generate Schedule'; }
 }
 
+function removeSchedPlanItem(idx) {
+  const row = document.querySelector(`.schedule-preview-item[data-idx="${idx}"]`);
+  if (row) row.remove();
+}
+
+function addSchedPlanItem() {
+  const list = document.querySelector('.schedule-preview-list');
+  if (!list) return;
+  const newIdx = Date.now();
+  const now = new Date();
+  const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const itemHtml = `
+    <div class="schedule-preview-item editable" data-idx="${newIdx}" style="display:flex;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
+      <input class="form-input sched-item-time" type="time" value="${timeStr}" style="width:90px;padding:4px 6px;font-size:12px">
+      <input class="form-input sched-item-activity" value="Custom Study Block" placeholder="Activity" style="flex:1;padding:4px 8px;font-size:13px">
+      <input class="form-input sched-item-duration" type="number" value="30" min="5" max="180" style="width:65px;padding:4px 6px;font-size:12px" title="Duration in minutes">m
+      <select class="form-select sched-item-type" style="width:95px;padding:4px 6px;font-size:12px">
+        <option value="study" selected>Study</option>
+        <option value="break">Break</option>
+        <option value="meal">Meal</option>
+        <option value="exercise">Exercise</option>
+        <option value="revision">Revision</option>
+        <option value="warmup">Warmup</option>
+      </select>
+      <button class="btn btn-ghost btn-sm" data-action="removeSchedPlanItem" data-idx="${newIdx}" style="color:var(--danger);padding:4px 8px" title="Remove block">✕</button>
+    </div>
+  `;
+  list.insertAdjacentHTML('beforeend', itemHtml);
+}
+
 function showSchedulePlanApproval(plan) {
   showModal('📅 AI Schedule Preview', `
     <div class="ai-thinking" style="margin-bottom:10px">
       <span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span>
-      <span style="margin-left:4px">Generated ${formatProviderLabel(plan.provider)} — review before saving</span>
+      <span style="margin-left:4px">Generated ${formatProviderLabel(plan.provider)} — customize before saving</span>
     </div>
-    <div style="max-height:340px;overflow-y:auto;margin:14px 0">
+    <div style="font-size:12px;color:var(--text-3);margin-bottom:6px">Review, re-order, or edit schedule blocks below:</div>
+    <div class="schedule-preview-list" style="max-height:300px;overflow-y:auto;margin:10px 0">
       ${renderSchedule(plan.payload)}
+    </div>
+    <div style="margin-bottom:14px">
+      <button class="btn btn-ghost btn-sm" data-action="addSchedPlanItem">＋ Add Block</button>
     </div>
     <div class="plan-actions">
       <button class="btn btn-ghost"     data-action="regenerateSchedule">↺ Regenerate</button>
@@ -2084,31 +2292,23 @@ function setPlannerTimeNow() {
 }
 
 function renderSchedule(schedule) {
-  const typeColors = { study:'var(--accent)', break:'var(--success)', exercise:'var(--info)', revision:'#a78bfa', warmup:'var(--text-3)', meal:'#f59e0b' };
-  // helpers to compute end time from start HH:MM + duration minutes
-  const toMins = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
-  const toHHMM = m => `${String(Math.floor(m / 60) % 24).padStart(2,'0')}:${String(m % 60).padStart(2,'0')}`;
-  const fmtAMPM = t => {
-    const [h, m] = t.split(':').map(Number);
-    const ampm = h < 12 ? 'AM' : 'PM';
-    const h12  = h % 12 || 12;
-    return `${h12}:${String(m).padStart(2,'0')} ${ampm}`;
-  };
   return `<div style="display:flex;flex-direction:column;gap:6px">` +
-    (schedule || []).map(b => {
-      const validTime = /^\d{1,2}:\d{2}$/.test(b.time || '');
-      const endHHMM   = validTime ? toHHMM(toMins(b.time) + (b.duration || 0)) : '';
-      const timeRange = validTime && endHHMM
-        ? `${fmtAMPM(b.time)}\u2013${fmtAMPM(endHHMM)}`
-        : (b.time || '');
-      return `
-        <div class="plan-preview-item">
-          <span class="pp-time" style="font-variant-numeric:tabular-nums;min-width:140px">${timeRange}</span>
-          <span class="pp-title">${escapeHTML(b.activity)}</span>
-          <span class="pp-meta" style="color:${typeColors[b.type]||'var(--text-3)'};white-space:nowrap">${b.duration}m · ${b.type || 'study'}</span>
-        </div>
-      `;
-    }).join('') +
+    (schedule || []).map((b, i) => `
+      <div class="schedule-preview-item editable" data-idx="${i}" style="display:flex;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
+        <input class="form-input sched-item-time" type="time" value="${b.time || '18:00'}" style="width:90px;padding:4px 6px;font-size:12px">
+        <input class="form-input sched-item-activity" value="${escapeHTML(b.activity || '')}" placeholder="Activity" style="flex:1;padding:4px 8px;font-size:13px">
+        <input class="form-input sched-item-duration" type="number" value="${b.duration || 30}" min="5" max="180" style="width:65px;padding:4px 6px;font-size:12px" title="Duration in minutes">m
+        <select class="form-select sched-item-type" style="width:95px;padding:4px 6px;font-size:12px">
+          <option value="study" ${b.type === 'study' ? 'selected' : ''}>Study</option>
+          <option value="break" ${b.type === 'break' ? 'selected' : ''}>Break</option>
+          <option value="meal" ${b.type === 'meal' ? 'selected' : ''}>Meal</option>
+          <option value="exercise" ${b.type === 'exercise' ? 'selected' : ''}>Exercise</option>
+          <option value="revision" ${b.type === 'revision' ? 'selected' : ''}>Revision</option>
+          <option value="warmup" ${b.type === 'warmup' ? 'selected' : ''}>Warmup</option>
+        </select>
+        <button class="btn btn-ghost btn-sm" data-action="removeSchedPlanItem" data-idx="${i}" style="color:var(--danger);padding:4px 8px" title="Remove block">✕</button>
+      </div>
+    `).join('') +
   `</div>`;
 }
 
@@ -2155,11 +2355,11 @@ async function renderCoach(container) {
       
       <!-- Session Templates -->
       <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
-        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('qs-input').value='30 min DSA'">30 min DSA</button>
-        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('qs-input').value='45 min React'">45 min React</button>
-        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('qs-input').value='60 min Python'">60 min Python</button>
-        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('qs-input').value='90 min NQT'">90 min NQT</button>
-        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('qs-input').value='120 min Project Work'">120 min Project</button>
+        <button class="btn btn-ghost btn-sm" data-action="setQuickSessionTemplate" data-template="30 min DSA">30 min DSA</button>
+        <button class="btn btn-ghost btn-sm" data-action="setQuickSessionTemplate" data-template="45 min React">45 min React</button>
+        <button class="btn btn-ghost btn-sm" data-action="setQuickSessionTemplate" data-template="60 min Python">60 min Python</button>
+        <button class="btn btn-ghost btn-sm" data-action="setQuickSessionTemplate" data-template="90 min NQT">90 min NQT</button>
+        <button class="btn btn-ghost btn-sm" data-action="setQuickSessionTemplate" data-template="120 min Project Work">120 min Project</button>
       </div>
 
       <div style="display:flex;gap:10px">
@@ -3193,8 +3393,8 @@ async function renderTimeBlocking(container) {
                   <div style="font-size:11px;color:var(--text-3)">${s.duration_minutes}m • ${s.session_type}</div>
                 </div>
                 <div style="display:flex;gap:6px">
-                  <button class="btn btn-primary btn-sm" onclick="startSavedSession(${s.id})">▶</button>
-                  <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="deleteSavedSession(${s.id})">✕</button>
+                  <button class="btn btn-primary btn-sm" data-action="startSavedSession" data-session-id="${s.id}">▶</button>
+                  <button class="btn btn-ghost btn-sm" style="color:var(--danger)" data-action="deleteSavedSession" data-session-id="${s.id}">✕</button>
                 </div>
               </div>
             `).join('')}
@@ -4451,25 +4651,22 @@ async function renderSettings(container) {
     </div>
 
     <div class="card" id="settings-section-theme" style="max-width:680px;margin-bottom:16px;padding:20px 22px">
-      <div class="card-title" style="font-size:14px;margin-bottom:6px">🎨 Theme</div>
-      <div style="font-size:12px;color:var(--text-3);margin-bottom:14px">Select your preferred application appearance:</div>
-      <div style="display:grid;grid-template-columns:repeat(2, 1fr);gap:12px">
-        <button class="btn ${(settings.theme||'dark')==='dark' ? 'btn-primary' : 'btn-secondary'}"
-          style="padding:12px 16px;font-size:13px;display:flex;align-items:center;justify-content:center;gap:8px"
+      <div class="card-title" style="font-size:14px;margin-bottom:4px">Appearance</div>
+      <div style="font-size:12px;color:var(--text-3);margin-bottom:14px">Choose your preferred interface theme.</div>
+      <div class="theme-selector-row">
+        <button class="theme-option ${App.settings.theme === 'dark' ? 'selected' : ''}"
           data-action="setTheme" data-theme="dark">
-          <span style="font-size:16px">🌙</span>
-          <span style="font-weight:700">Dark Theme</span>
-          ${(settings.theme||'dark')==='dark' ? '<span style="font-size:10px;background:rgba(0,0,0,0.25);padding:2px 7px;border-radius:10px;margin-left:4px">Active</span>' : ''}
+          <span class="theme-option-label">Dark</span>
+          ${App.settings.theme === 'dark' ? '<span class="theme-option-check">✓</span>' : ''}
         </button>
-        <button class="btn ${(settings.theme||'dark')==='light' ? 'btn-primary' : 'btn-secondary'}"
-          style="padding:12px 16px;font-size:13px;display:flex;align-items:center;justify-content:center;gap:8px"
+        <button class="theme-option ${App.settings.theme !== 'dark' ? 'selected' : ''}"
           data-action="setTheme" data-theme="light">
-          <span style="font-size:16px">☀️</span>
-          <span style="font-weight:700">Light Theme</span>
-          ${(settings.theme||'dark')==='light' ? '<span style="font-size:10px;background:rgba(255,255,255,0.25);padding:2px 7px;border-radius:10px;margin-left:4px">Active</span>' : ''}
+          <span class="theme-option-label">Light</span>
+          ${App.settings.theme !== 'dark' ? '<span class="theme-option-check">✓</span>' : ''}
         </button>
       </div>
     </div>
+
 
     <div class="card" id="settings-section-ai" style="max-width:680px;margin-bottom:16px;padding:20px 22px">
       <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;font-size:14px;margin-bottom:6px">
@@ -4484,12 +4681,24 @@ async function renderSettings(container) {
           <span style="font-weight:600;color:var(--text-1)">Managed by StudyFlow AI</span>
         </div>
         <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--bg-2, rgba(255,255,255,0.03));border-radius:8px">
-          <span style="color:var(--text-2)">Gemini</span>
-          <span style="font-weight:600;color:${geminiStatus.configured ? 'var(--success)' : 'var(--text-3)'}">${geminiStatus.configured ? '● Available' : '○ Unavailable'}</span>
+          <span style="color:var(--text-2)">Gemini (Primary)</span>
+          ${(() => {
+            const st = geminiStatus.status || (geminiStatus.configured ? 'configured' : 'not_configured');
+            if (st === 'available') return '<span style="font-weight:600;color:var(--success)">● Available</span>';
+            if (st === 'configured') return '<span style="font-weight:600;color:var(--accent)">● Configured</span>';
+            if (st === 'unavailable') return '<span style="font-weight:600;color:var(--danger, #e57373)">○ Unavailable</span>';
+            return '<span style="font-weight:600;color:var(--text-3)">○ Not Configured</span>';
+          })()}
         </div>
         <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--bg-2, rgba(255,255,255,0.03));border-radius:8px">
-          <span style="color:var(--text-2)">Groq fallback</span>
-          <span style="font-weight:600;color:${groqStatus.configured ? 'var(--success)' : 'var(--text-3)'}">${groqStatus.configured ? '● Available' : '○ Unavailable'}</span>
+          <span style="color:var(--text-2)">Groq (Fallback)</span>
+          ${(() => {
+            const st = groqStatus.status || (groqStatus.configured ? 'configured' : 'not_configured');
+            if (st === 'available') return '<span style="font-weight:600;color:var(--success)">● Available</span>';
+            if (st === 'configured') return '<span style="font-weight:600;color:var(--accent)">● Configured</span>';
+            if (st === 'unavailable') return '<span style="font-weight:600;color:var(--danger, #e57373)">○ Unavailable</span>';
+            return '<span style="font-weight:600;color:var(--text-3)">○ Not Configured</span>';
+          })()}
         </div>
         <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--bg-2, rgba(255,255,255,0.03));border-radius:8px">
           <span style="color:var(--text-2)">Daily usage</span>

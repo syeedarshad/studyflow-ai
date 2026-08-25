@@ -73,8 +73,10 @@ async def generate_ai_response(
     return AIGenerateResponse(
         success=result["success"],
         text=result.get("text", ""),
-        provider=result.get("provider", "none"),
+        provider=result.get("provider", "offline"),
         model=result.get("model"),
+        offline=result.get("offline", not result["success"]),
+        fallback_used=result.get("fallback_used", False),
         tokens_used=result.get("tokens_used"),
         error=result.get("error"),
     )
@@ -121,12 +123,15 @@ async def get_provider_status(
     auth: CurrentAuth = Depends(require_auth),
 ) -> ProviderAvailabilityResponse:
     """
-    Returns which AI providers have server-side keys configured.
+    Returns which AI providers have server-side keys configured and their health state.
     Used by the Settings 'AI Services' card.
 
-    ONLY returns boolean availability — never the actual keys.
+    ONLY returns boolean availability and health status — never the actual keys.
     """
+    health = AIProviderService.get_provider_health()
     return ProviderAvailabilityResponse(
-        gemini_available=bool(settings.effective_gemini_key),
-        groq_available=bool(settings.effective_groq_key),
+        gemini_available=health["gemini"]["available"],
+        groq_available=health["groq"]["available"],
+        gemini_status=health["gemini"]["status"],
+        groq_status=health["groq"]["status"],
     )

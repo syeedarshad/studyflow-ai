@@ -55,19 +55,21 @@ async def list_providers(
     No user API keys involved — status reflects server configuration only.
     API keys are NEVER returned.
     """
-    gemini_configured = bool(settings.effective_gemini_key)
-    groq_configured = bool(settings.effective_groq_key)
+    from app.api.ai.service import AIProviderService
+    health = AIProviderService.get_provider_health()
 
     return ProvidersListResponse(
         providers=[
             ProviderStatusResponse(
                 provider="gemini",
-                configured=gemini_configured,
+                configured=health["gemini"]["configured"],
+                status=health["gemini"]["status"],
                 masked_key=None,  # Never expose key status as masked chars
             ),
             ProviderStatusResponse(
                 provider="groq",
-                configured=groq_configured,
+                configured=health["groq"]["configured"],
+                status=health["groq"]["status"],
                 masked_key=None,
             ),
         ]
@@ -112,20 +114,24 @@ async def get_provider_status(
     db: AsyncSession = Depends(get_db),
 ) -> ProviderStatusResponse:
     """
-    Returns whether the specified provider is configured server-side.
+    Returns whether the specified provider is configured server-side and its health.
     API keys are NEVER returned.
     """
+    from app.api.ai.service import AIProviderService
+    health = AIProviderService.get_provider_health()
     provider_clean = provider.lower().strip()
-    if provider_clean == "gemini":
-        configured = bool(settings.effective_gemini_key)
-    elif provider_clean == "groq":
-        configured = bool(settings.effective_groq_key)
+
+    if provider_clean in health:
+        configured = health[provider_clean]["configured"]
+        p_status = health[provider_clean]["status"]
     else:
         configured = False
+        p_status = "not_configured"
 
     return ProviderStatusResponse(
         provider=provider_clean,
         configured=configured,
+        status=p_status,
         masked_key=None,
     )
 

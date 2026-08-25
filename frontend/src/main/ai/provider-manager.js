@@ -106,10 +106,41 @@ class ProviderManager {
     if (!context) return '';
     const lines = [];
 
-    if (context.bestFocusHours?.length) {
-      const hours = context.bestFocusHours.map(h => `${h}:00`).join(', ');
-      lines.push(`The user focuses best around: ${hours}.`);
+    // Real local time & timezone context
+    if (context.currentDate && context.currentTime) {
+      lines.push(`Current local date & time: ${context.currentDate}, ${context.currentTime} (${context.dayOfWeek || ''}, Timezone: ${context.timezone || 'local'}).`);
     }
+
+    // 7-day activity & pattern analysis
+    if (context.history7Days) {
+      const h = context.history7Days;
+      if (h.completedCount > 0) {
+        lines.push(`Past 7 days completed: ${h.completedCount} task(s) ${h.topCompletedCategories?.length ? `(${h.topCompletedCategories.join(', ')})` : ''}.`);
+      }
+      if (h.pendingTasks?.length) {
+        const pList = h.pendingTasks.map(t => `"${t.title}" (${t.category}, ${t.priority})`).join('; ');
+        lines.push(`Active pending tasks: ${pList}.`);
+      }
+      if (h.overdueCount > 0) {
+        lines.push(`User currently has ${h.overdueCount} overdue task(s) — prioritize or balance these.`);
+      }
+      if (h.focusMinutes > 0) {
+        lines.push(`Focus history: ${h.focusMinutes} focus minutes across ${h.sessionCount} session(s) in last 7 days.`);
+      }
+      if (h.productiveHours?.length) {
+        lines.push(`User focuses best around: ${h.productiveHours.join(', ')}.`);
+      }
+      if (h.existingToday?.length) {
+        const existList = h.existingToday.map(t => `"${t.title}" (${t.time})`).join('; ');
+        lines.push(`Already scheduled today: ${existList} — DO NOT duplicate or conflict with these.`);
+      }
+    } else {
+      if (context.bestFocusHours?.length) {
+        const hours = context.bestFocusHours.map(hr => `${hr}:00`).join(', ');
+        lines.push(`The user focuses best around: ${hours}.`);
+      }
+    }
+
     if (context.productiveCategories?.length) {
       lines.push(`Most consistent categories: ${context.productiveCategories.join(', ')}.`);
     }
@@ -166,6 +197,84 @@ class ProviderManager {
     return `\nLearned context about this user (use it to personalise, but don't force it):\n${lines.map(l => `- ${l}`).join('\n')}\n`;
   }
 
+  /**
+   * Deterministically validates and normalizes schedule blocks to eliminate
+   * time overlaps, fix impossible meal hours, sanitize durations, and enforce
+   * strict chronological continuity.
+   */
+  static validateAndNormalizeSchedule(rawSchedule, startTime = '18:00', totalHours = 4) {
+    if (!Array.isArray(rawSchedule) || rawSchedule.length === 0) return [];
+
+    const [startH, startM] = String(startTime || '18:00').split(':').map(Number);
+    let currentTotalMins = (startH || 0) * 60 + (startM || 0);
+    const maxTotalMins = currentTotalMins + Math.round((totalHours || 4) * 60);
+
+    const validTypes = ['study', 'break', 'meal', 'exercise', 'revision', 'warmup'];
+    const normalized = [];
+    const seenActivities = new Set();
+
+    for (const b of rawSchedule) {
+      if (!b || typeof b !== 'object') continue;
+      if (currentTotalMins >= maxTotalMins && normalized.length >= 2) break;
+
+      let activity = String(b.activity || '').trim();
+      if (!activity) continue;
+
+      let duration = Number.isFinite(b.duration) ? Math.max(5, Math.min(180, Math.round(b.duration))) : 30;
+      let type = validTypes.includes(b.type) ? b.type : 'study';
+
+      const curH = Math.floor(currentTotalMins / 60) % 24;
+      const curM = currentTotalMins % 60;
+      const timeStr = `${String(curH).padStart(2, '0')}:${String(curM).padStart(2, '0')}`;
+
+      // Meal and routine sanity checks
+      const actLower = activity.toLowerCase();
+      const isMealOrFood = type === 'meal' || actLower.includes('breakfast') || actLower.includes('lunch') || actLower.includes('dinner');
+
+      if (isMealOrFood) {
+        if (curH >= 5 && curH < 11) {
+          activity = activity.replace(/lunch|dinner/gi, 'Breakfast');
+          type = 'meal';
+        } else if (curH >= 11 && curH < 16) {
+          activity = activity.replace(/breakfast|dinner/gi, 'Lunch');
+          type = 'meal';
+        } else if (curH >= 16 && curH < 22) {
+          activity = activity.replace(/breakfast|lunch/gi, (curH >= 19 ? 'Dinner' : 'Evening Snack'));
+          type = 'meal';
+        } else {
+          // Late night: no full meal
+          activity = '🌙 Light Snack & Wind Down';
+          type = 'break';
+          duration = Math.min(duration, 15);
+        }
+      }
+
+      // Late night (22:00 - 05:00) workout sanity
+      if ((curH >= 22 || curH < 5) && (type === 'exercise' || type === 'warmup')) {
+        activity = '🔁 Calm Revision & Notes';
+        type = 'revision';
+      }
+
+      // Deduplication check
+      const normKey = activity.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (seenActivities.has(normKey) && type !== 'break' && type !== 'revision') {
+        continue;
+      }
+      seenActivities.add(normKey);
+
+      normalized.push({
+        time: timeStr,
+        activity,
+        duration,
+        type
+      });
+
+      currentTotalMins += duration;
+    }
+
+    return normalized;
+  }
+
   // ═══════════════════════════════════════════════════════════════════════
   // CORE FALLBACK CHAIN — Routes through backend (Phase 4)
   // ═══════════════════════════════════════════════════════════════════════
@@ -196,9 +305,11 @@ class ProviderManager {
       throw new Error('No backend session available');
     }
 
+    const http = require('http');
     const https = require('https');
-    const BACKEND_HOST = '127.0.0.1';
-    const BACKEND_PORT = 8000;
+    const backendBase = process.env.STUDYFLOW_BACKEND_URL || 'http://127.0.0.1:8000';
+    const parsedUrl = new URL('/api/v1/ai/generate', backendBase);
+    const transport = parsedUrl.protocol === 'https:' ? https : http;
 
     const bodyStr = JSON.stringify({
       prompt,
@@ -208,9 +319,9 @@ class ProviderManager {
 
     const responseText = await new Promise((resolve, reject) => {
       const options = {
-        hostname: BACKEND_HOST,
-        port:     BACKEND_PORT,
-        path:     '/api/v1/ai/generate',
+        hostname: parsedUrl.hostname,
+        port:     parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
+        path:     parsedUrl.pathname + parsedUrl.search,
         method:   'POST',
         headers: {
           'Content-Type':   'application/json',
@@ -220,7 +331,7 @@ class ProviderManager {
         timeout: 60000,
       };
 
-      const req = https.request(options, (res) => {
+      const req = transport.request(options, (res) => {
         let data = '';
         res.on('data', chunk => (data += chunk));
         res.on('end', () => {
@@ -257,7 +368,14 @@ class ProviderManager {
       throw new Error(safeErr);
     }
 
-    return { text: parsed.text, provider: parsed.provider || 'gemini' };
+    return {
+      text:          parsed.text,
+      provider:      parsed.provider || 'gemini',
+      model:         parsed.model || null,
+      offline:       parsed.offline === true,
+      fallback_used: parsed.fallback_used === true,
+      tokens_used:   parsed.tokens_used || null,
+    };
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -274,6 +392,23 @@ class ProviderManager {
       .replace(/^```(?:json)?\s*/i, '')
       .replace(/\s*```\s*$/, '')
       .trim();
+  }
+
+  /**
+   * Safely unwraps an array whether the AI returned a top-level array
+   * or a wrapper object like { tasks: [...] }, { schedule: [...] }, etc.
+   */
+  static extractArray(data, candidateKeys = []) {
+    if (Array.isArray(data)) return data;
+    if (data && typeof data === 'object') {
+      for (const key of candidateKeys) {
+        if (Array.isArray(data[key])) return data[key];
+      }
+      for (const val of Object.values(data)) {
+        if (Array.isArray(val)) return val;
+      }
+    }
+    return null;
   }
 
   /**
@@ -391,28 +526,10 @@ class ProviderManager {
    * Tries Gemini then Groq; runs parseFn on each response.
    * Parse failures advance to the next provider (does not silently truncate).
    */
-  async _callWithParseFallback(prompt, parseFn) {
-    const keys = this.getKeys();
-    const providers = [
-      keys.gemini && { name: 'gemini', call: () => callGemini(keys.gemini, prompt) },
-      keys.groq   && { name: 'groq',   call: () => callGroq(keys.groq, prompt) },
-    ].filter(Boolean);
-
-    let lastErr;
-    for (const p of providers) {
-      console.log(`TRYING ${p.name.toUpperCase()}`);
-      try {
-        const text = await p.call();
-        const parsed = parseFn(text);
-        return { text, provider: p.name, parsed };
-      } catch (err) {
-        console.log(`${p.name.toUpperCase()} FAILED:`, err);
-        lastErr = err;
-      }
-    }
-
-    console.log('ALL PROVIDERS FAILED');
-    throw lastErr || new Error('No AI providers configured');
+  async _callWithParseFallback(prompt, parseFn, feature = 'roadmap') {
+    const res = await this.callWithFallback(prompt, feature);
+    const parsed = parseFn(res.text);
+    return { text: res.text, provider: res.provider, parsed };
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -455,7 +572,8 @@ User's goal description:
     const cleaned = ProviderManager.cleanJSON(text);
     let tasks;
     try {
-      tasks = JSON.parse(cleaned);
+      const parsed = JSON.parse(cleaned);
+      tasks = ProviderManager.extractArray(parsed, ['tasks', 'items', 'plan', 'payload']);
       if (!Array.isArray(tasks)) throw new Error('not an array');
     } catch (err) {
       return OfflineEngine.generateTasks(userPrompt, context);
@@ -509,7 +627,8 @@ Respond ONLY with the JSON array.`;
     const cleaned = ProviderManager.cleanJSON(text);
     let segments;
     try {
-      segments = JSON.parse(cleaned);
+      const parsed = JSON.parse(cleaned);
+      segments = ProviderManager.extractArray(parsed, ['segments', 'session', 'blocks']);
       if (!Array.isArray(segments)) throw new Error('not an array');
     } catch (err) {
       return OfflineEngine.generateQuickSession(prompt, context);
@@ -557,27 +676,25 @@ Respond ONLY with the JSON array.`;
 
     const prompt = `You are a study-planning assistant for a productivity app called StudyFlow AI.
 
-Create a realistic study/work schedule as a JSON array of blocks. Each block object must have:
-- "time": start time in HH:MM 24-hour format
-- "activity": short description (may include relevant emoji)
-- "duration": duration in minutes (integer)
+Create a realistic, context-aware study/work schedule as a JSON array of blocks. Each block object must have:
+- "time": start time in HH:MM 24-hour format (strictly chronological starting from ${startTime})
+- "activity": short actionable description (may include relevant emoji)
+- "duration": duration in minutes (integer, typically 15-60)
 - "type": one of "study", "break", "meal", "exercise", "revision", "warmup"
 
 Constraints:
-- Total available time: ${hours} hours, starting at ${startTime}
+- Total available time: ${hours} hours, starting strictly at or after ${startTime}
 - User's energy level: ${energy}
 - Priority subjects/tasks: ${priorities.length ? priorities.join(', ') : 'no specific priorities — choose sensible study topics'}
 - Study task durations: Low energy = 25 min, Medium = 45 min, High = 60 min
 - Never create "DSA Practice", "Python Coding", "React Coding", "JavaScript Coding", "Project Development", or "Mock Tests" tasks for less than 25 minutes.
-- Handle leftover time chunks accurately:
-  - 0-10 min: Leave unused (do not schedule anything)
-  - 10-15 min: Assign to a Break block (Stretch / Hydrate / Walk)
-  - 15-25 min: Assign to a Revision block (Quick Revision / Flashcards / Notes Review)
-  - >= 25 min (but smaller than study block size): Assign to a Revision block (Revision Session)
-- If remaining free time is smaller than the selected study block size, do not force-create a short study task. Convert it to a recovery or revision block following the rules above.
-- Include short breaks between long study blocks
+- Deduplication: Do NOT duplicate existing scheduled or completed tasks from the context.
+- Meal / Break rules:
+  - Do NOT force meals into short sessions (<= 2 hours).
+  - Only include a meal block (30-40 min) if the schedule duration is >= 3 hours AND naturally crosses a realistic meal window (Breakfast: 07:30-09:30, Lunch: 12:30-14:30, Dinner: 19:30-21:30).
+  - Never schedule breakfast in the afternoon/night, and never schedule dinner in the morning.
 ${timeOfDayRule}
-- Always end the schedule with a "revision" block, never a "warmup" block — warmup (if used at all) only belongs at the very start.
+- Always ensure each block's start time immediately follows the previous block with ZERO gaps and ZERO overlaps.
 - Extra context from user: ${notes || 'none'}
 ${contextBlock}
 Respond with ONLY a raw JSON array of blocks. No markdown, no explanation, no extra text.`;
@@ -592,24 +709,16 @@ Respond with ONLY a raw JSON array of blocks. No markdown, no explanation, no ex
     const cleaned = ProviderManager.cleanJSON(text);
     let schedule;
     try {
-      schedule = JSON.parse(cleaned);
+      const parsed = JSON.parse(cleaned);
+      schedule = ProviderManager.extractArray(parsed, ['schedule', 'blocks', 'timetable', 'items']);
       if (!Array.isArray(schedule)) throw new Error('not an array');
     } catch (err) {
       return OfflineEngine.generateSchedule({ hours, energy, priorities, startTime });
     }
 
-    const validTypes = ['study', 'break', 'meal', 'exercise', 'revision', 'warmup'];
-    const validated = schedule
-      .filter(b => b && typeof b.activity === 'string' && /^\d{1,2}:\d{2}$/.test(b.time || ''))
-      .map(b => ({
-        time:     b.time,
-        activity: b.activity.trim(),
-        duration: Number.isFinite(b.duration) ? Math.max(5, Math.round(b.duration)) : 30,
-        type:     validTypes.includes(b.type) ? b.type : 'study'
-      }));
-
-    if (validated.length === 0) return OfflineEngine.generateSchedule({ hours, energy, priorities, startTime });
-    return { schedule: validated, provider };
+    const normalized = ProviderManager.validateAndNormalizeSchedule(schedule, startTime, hours);
+    if (normalized.length === 0) return OfflineEngine.generateSchedule({ hours, energy, priorities, startTime });
+    return { schedule: normalized, provider };
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -804,7 +913,8 @@ Respond with ONLY the raw JSON array. No markdown, no explanation.`;
     const cleaned = ProviderManager.cleanJSON(text);
     let templates;
     try {
-      templates = JSON.parse(cleaned);
+      const parsed = JSON.parse(cleaned);
+      templates = ProviderManager.extractArray(parsed, ['templates', 'activities', 'tasks', 'items']);
       if (!Array.isArray(templates)) throw new Error('not an array');
     } catch (err) {
       return OfflineEngine.generateGoalPlan({ goalTitle, deadlineDays, description });
@@ -924,21 +1034,15 @@ Projects must be concrete and portfolio-worthy.
 
 Respond with ONLY a raw JSON array. No markdown, no explanation.`;
 
-    console.log('ROADMAP START');
-
     let text, provider, milestones;
     try {
       ({ text, provider, parsed: milestones } = await this._callWithParseFallback(
         prompt,
         (raw) => ProviderManager.parseRoadmapMilestones(raw, totalMonths)
       ));
-      console.log('ROADMAP PROVIDER:', provider);
-      console.log('ROADMAP RAW RESPONSE:', text);
-      console.log('ROADMAP CLEANED:', ProviderManager.cleanJSON(text));
-      console.log('ROADMAP PARSED:', milestones);
+      logger.info(`[roadmap] Generated successfully via ${provider}`);
     } catch (err) {
-      console.error('ROADMAP PROVIDER FAILED:', err);
-      console.log('ROADMAP FALLBACK REASON:', err.message);
+      logger.warn(`[roadmap] Provider generation failed, using offline fallback: ${err.message}`);
       return OfflineEngine.generateCareerRoadmap(targetRole, totalMonths);
     }
 
@@ -953,7 +1057,7 @@ Respond with ONLY a raw JSON array. No markdown, no explanation.`;
       }));
 
     if (validated.length === 0) {
-      console.log('ROADMAP FALLBACK REASON:', `validation produced zero milestones from ${milestones.length} parsed item(s)`);
+      logger.warn(`[roadmap] Validation produced 0 milestones, using offline fallback`);
       return OfflineEngine.generateCareerRoadmap(targetRole, totalMonths);
     }
     return { milestones: validated, provider };

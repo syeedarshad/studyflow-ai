@@ -35,6 +35,8 @@ class AIGenerateResponse(BaseModel):
     text: str = ""                # the AI-generated text
     provider: str = "offline"     # 'gemini', 'groq', or 'offline'
     model: Optional[str] = None   # model name if available
+    offline: bool = False         # True if offline fallback was used
+    fallback_used: bool = False   # True if fallback provider or offline was used
     tokens_used: Optional[int] = None
     error: Optional[str] = None   # safe user-facing error message only
 
@@ -55,6 +57,8 @@ class UsageResponse(BaseModel):
 # ─── Provider Status (for AI Services card in Settings) ──────────────────────
 
 class ProviderAvailabilityResponse(BaseModel):
-    """Indicates whether each server-side provider key is configured."""
+    """Indicates whether each server-side provider key is configured and its health state."""
     gemini_available: bool
     groq_available: bool
+    gemini_status: str = "configured"  # 'available' | 'configured' | 'unavailable' | 'not_configured'
+    groq_status: str = "configured"    # 'available' | 'configured' | 'unavailable' | 'not_configured'

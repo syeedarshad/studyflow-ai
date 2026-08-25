@@ -87,6 +87,8 @@ class Settings(BaseSettings):
     # backward-compat with existing .env files during transition.
     GEMINI_API_KEY: str = ""
     GROQ_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-3.6-flash"
+    GROQ_MODEL: str = "openai/gpt-oss-20b"
 
     # Deprecated aliases — kept so existing .env files still work.
     # Prefer GEMINI_API_KEY / GROQ_API_KEY going forward.

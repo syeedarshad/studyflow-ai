@@ -567,7 +567,7 @@ function setupIPC() {
     'getAllSettings', 'getCategoryStats', 'getMonthlyStats', 'getNotes',
     'getPendingPlan', 'getPlan', 'getStreak', 'getStreakHistory', 'getTasks',
     'getTodaySessions', 'getTodayTasks', 'getTodayXP', 'getTotalXP',
-    'getWeeklyStats', 'getWellness', 'getXPTrend', 'setSetting', 'updateNote',
+    'getWeeklyStats', 'getWellness', 'getXPTrend', 'savePlan', 'setSetting', 'updateNote',
     'updateTask', 'updateWellness'
   ]);
 

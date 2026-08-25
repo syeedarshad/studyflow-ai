@@ -22,7 +22,8 @@ class ProviderStatusResponse(BaseModel):
     """Masked provider status response — NEVER includes plaintext keys."""
     provider: str
     configured: bool
-    masked_key: Optional[str] = "••••••••"
+    status: str = "configured"
+    masked_key: Optional[str] = None
 
 
 class ProvidersListResponse(BaseModel):

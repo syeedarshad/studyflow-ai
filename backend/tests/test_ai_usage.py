@@ -335,11 +335,11 @@ async def test_provider_keys_never_in_status_response(async_client):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 10. Provider failures do not expose API keys
+# 10. Provider failures do not expose API keys & returns offline metadata
 # ──────────────────────────────────────────────────────────────────────────────
 
-async def test_provider_failure_does_not_expose_keys(async_client):
-    """When Gemini and Groq both fail, the error response must not leak keys."""
+async def test_provider_failure_does_not_expose_keys_and_returns_offline(async_client):
+    """When Gemini and Groq both fail, response is safe and marked offline=True."""
     user = await register_user(async_client, email=make_unique_email("fail_nokey"))
     headers = auth_header(user["session_token"])
 
@@ -351,10 +351,13 @@ async def test_provider_failure_does_not_expose_keys(async_client):
             headers=headers,
         )
 
-    # Request succeeds at HTTP level (200), but AI call failed
+    # Request succeeds at HTTP level (200), with offline metadata
     assert resp.status_code == 200
     data = resp.json()
     assert data["success"] is False
+    assert data["provider"] == "offline"
+    assert data["offline"] is True
+    assert data["fallback_used"] is True
 
     # No key material in response
     text = resp.text
@@ -364,11 +367,11 @@ async def test_provider_failure_does_not_expose_keys(async_client):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 11. Gemini → Groq fallback works
+# 11. Gemini → Groq fallback works & returns explicit fallback metadata
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def test_gemini_to_groq_fallback_on_gemini_failure(async_client):
-    """When Gemini fails, Groq is tried and its response is returned."""
+    """When Gemini fails, Groq is tried and returns fallback_used=True, offline=False."""
     user = await register_user(async_client, email=make_unique_email("fallback"))
     headers = auth_header(user["session_token"])
 
@@ -387,7 +390,38 @@ async def test_gemini_to_groq_fallback_on_gemini_failure(async_client):
     data = resp.json()
     assert data["success"] is True
     assert data["provider"] == "groq"
-    assert "Study math" in data["text"] or data["text"]  # text returned
+    assert data["offline"] is False
+    assert data["fallback_used"] is True
+    assert "Study math" in data["text"] or data["text"]
+
+    # Verify daily usage is incremented by exactly 1 (no double counting)
+    usage_resp = await async_client.get("/api/v1/usage", headers=headers)
+    assert usage_resp.status_code == 200
+    assert usage_resp.json()["used"] == 1
+
+
+async def test_gemini_success_returns_correct_metadata(async_client):
+    """When Gemini succeeds, returns provider=gemini, offline=False, fallback_used=False."""
+    user = await register_user(async_client, email=make_unique_email("gemini_ok"))
+    headers = auth_header(user["session_token"])
+
+    gemini_result = {"text": '{"tasks":[{"title":"Review Physics"}]}', "model": GEMINI_MODEL, "tokens_used": 42}
+
+    with patch.object(AIProviderService, "_call_gemini", new_callable=AsyncMock) as mock_gemini:
+        mock_gemini.return_value = gemini_result
+        resp = await async_client.post(
+            "/api/v1/ai/generate",
+            json={"prompt": "Generate physics tasks"},
+            headers=headers,
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+    assert data["provider"] == "gemini"
+    assert data["offline"] is False
+    assert data["fallback_used"] is False
+    assert "Review Physics" in data["text"]
 
 
 # ──────────────────────────────────────────────────────────────────────────────

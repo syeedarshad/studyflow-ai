@@ -6,7 +6,7 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
-    "test": "node test/database.test.js && node test/auth.test.js && node test/theme.test.js && node test/settings.test.js && node test/sync-manager.test.js",
+    "test": "node test/database.test.js && node test/auth.test.js && node test/theme.test.js && node test/settings.test.js && node test/sync-manager.test.js && node test/ai-provider-pipeline.test.js",
     "build": "electron-builder build --win",
     "build:dir": "electron-builder build --win --dir",
     "pack": "electron-builder --dir"

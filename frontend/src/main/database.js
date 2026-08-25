@@ -92,6 +92,26 @@ class StudyFlowDB {
   // SCHEMA INITIALISATION
   // ═══════════════════════════════════════════════════════════════════════
 
+  /**
+   * isMigrationDone — checks whether a named migration has already run.
+   * Uses schema_migrations (a dedicated table with migration_key PRIMARY KEY),
+   * NOT the settings table. This avoids the UNIQUE(key, user_id) NULL-semantics
+   * trap: SQLite treats NULL != NULL, so INSERT OR REPLACE INTO settings with
+   * user_id = NULL creates a new row every app launch instead of updating the
+   * existing one, eventually colliding with the unique index.
+   */
+  isMigrationDone(migrationKey) {
+    return !!this.db.prepare('SELECT 1 FROM schema_migrations WHERE migration_key = ?').get(migrationKey);
+  }
+
+  /**
+   * markMigrationDone — records that a named migration has run.
+   * INSERT OR IGNORE so repeated calls are safe no-ops.
+   */
+  markMigrationDone(migrationKey) {
+    this.db.prepare('INSERT OR IGNORE INTO schema_migrations (migration_key) VALUES (?)').run(migrationKey);
+  }
+
   init() {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS users (
@@ -101,6 +121,17 @@ class StudyFlowDB {
         password_hash  TEXT NOT NULL,
         created_at     TEXT DEFAULT (datetime('now')),
         last_login_at  TEXT
+      );
+
+      /* ── schema_migrations ─────────────────────────────────────────────
+         Stores one-time migration completion flags.
+         Uses migration_key as PRIMARY KEY so INSERT OR IGNORE is truly
+         idempotent — unlike inserting into 'settings' with user_id = NULL
+         where SQLite's NULL != NULL semantics allow duplicate rows.
+      ─────────────────────────────────────────────────────────────────── */
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        migration_key TEXT PRIMARY KEY,
+        applied_at    TEXT DEFAULT (datetime('now'))
       );
 
       CREATE TABLE IF NOT EXISTS tasks (
@@ -455,13 +486,12 @@ class StudyFlowDB {
     `);
 
     // ── Phase 2A: one-time cleanup of legacy duplicate recurring tasks ─────
-    // Guarded by a persistent flag in the settings table so it runs exactly
-    // once per installation, not on every startup.
-    // Must run BEFORE creating the unique index so the index creation succeeds.
-    const _p2aDone = this.db.prepare("SELECT value FROM settings WHERE key='phase2a_cleanup_done'").get();
-    if (!_p2aDone || _p2aDone.value !== '1') {
+    // Guarded by schema_migrations (not settings) so the flag is truly
+    // idempotent. The old approach used INSERT OR REPLACE INTO settings with
+    // user_id = NULL which hit the UNIQUE constraint on every subsequent launch.
+    if (!this.isMigrationDone('phase2a_cleanup_done')) {
       this.cleanupDuplicateRecurringTasks();
-      this.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('phase2a_cleanup_done', '1')").run();
+      this.markMigrationDone('phase2a_cleanup_done');
     }
 
     // ── Phase 2A: unique index to prevent future duplicate recurring tasks ─
@@ -570,7 +600,7 @@ class StudyFlowDB {
         // Step 1: delete null-user rows that are still at their default value.
         // These were injected by the app and are now superseded by SETTINGS_DEFAULTS.
         // Rows that were explicitly customised by the user (value != default) are
-        // left alone on disk \u2014 they will not be surfaced to any authenticated session
+        // left alone on disk — they will not be surfaced to any authenticated session
         // but they remain for forensic/recovery purposes.
         const defaultEntries = Object.entries(SETTINGS_DEFAULTS);
         if (defaultEntries.length > 0) {
@@ -587,6 +617,21 @@ class StudyFlowDB {
           WHERE id NOT IN (
             SELECT MIN(id) FROM settings GROUP BY key, user_id
           )
+        `);
+
+        // Step 2b: collapse authenticated-user duplicate rows that accumulated
+        // from the old SELECT→INSERT race condition in setSetting.
+        // Keeps the row with the highest id (most recently written value) for
+        // each (key, user_id) pair. No user-visible data is lost — only the
+        // stale lower-id duplicates are removed.
+        this.db.exec(`
+          DELETE FROM settings
+          WHERE user_id IS NOT NULL
+            AND id NOT IN (
+              SELECT MAX(id) FROM settings
+              WHERE user_id IS NOT NULL
+              GROUP BY key, user_id
+            )
         `);
       }
 
@@ -615,8 +660,10 @@ class StudyFlowDB {
   // taken beforehand — this touches real, already-populated user data,
   // so it is deliberately conservative rather than clever.
   migrateForeignKeyActions() {
-    const done = this.db.prepare("SELECT value FROM settings WHERE key='fk_actions_migration_v1'").get();
-    if (done && done.value === '1') return;
+    // Use schema_migrations instead of settings for the completion flag.
+    // The old INSERT OR REPLACE INTO settings (user_id = NULL) pattern hit
+    // the UNIQUE constraint on every launch after the index was created.
+    if (this.isMigrationDone('fk_actions_migration_v1')) return;
 
     logger.info('Running one-time FK-action schema migration...');
 
@@ -796,7 +843,7 @@ class StudyFlowDB {
       // Re-enable OUTSIDE the transaction — see the comment above the OFF
       // pragma for why this can't happen inside transaction().
       this.db.pragma('foreign_keys = ON');
-      this.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('fk_actions_migration_v1', '1')").run();
+      this.markMigrationDone('fk_actions_migration_v1');
       logger.info('FK-action migration completed successfully — 0 orphaned rows.');
     } catch (err) {
       this.db.pragma('foreign_keys = ON'); // restore enforcement even on failure
@@ -876,11 +923,16 @@ class StudyFlowDB {
         storedValue = value;
       }
     }
-    const existing = this.db.prepare('SELECT 1 FROM settings WHERE key = ? AND user_id = ?').get(key, uid);
-    if (existing) {
-      return this.db.prepare('UPDATE settings SET value = ? WHERE key = ? AND user_id = ?').run(storedValue, key, uid);
-    }
-    return this.db.prepare('INSERT INTO settings (key, value, user_id) VALUES (?, ?, ?)').run(key, storedValue, uid);
+
+    // Single atomic upsert — no SELECT→INSERT race window.
+    // INSERT OR REPLACE on UNIQUE(key, user_id): if a row already exists for
+    // this (key, user_id) pair, SQLite deletes it and inserts the new one.
+    // This is functionally identical to UPDATE for settings (we only care about
+    // the current value, not the row id), and is safe even when multiple saves
+    // arrive in rapid succession from the renderer.
+    return this.db
+      .prepare('INSERT OR REPLACE INTO settings (key, value, user_id) VALUES (?, ?, ?)')
+      .run(key, storedValue, uid);
   }
 
   getAllSettings() {
@@ -905,16 +957,16 @@ class StudyFlowDB {
    */
   migrateApiKeysToEncrypted() {
     const uid = this.activeUserId;
+    // Per-user guard: if this user's keys are already encrypted, skip.
     if (uid !== null) {
       const userDone = this.db.prepare(
         "SELECT value FROM settings WHERE key='api_keys_encrypted_v1' AND user_id = ?"
       ).get(uid);
       if (userDone && userDone.value === '1') return;
     }
-    const globalDone = this.db.prepare(
-      "SELECT value FROM settings WHERE key='api_keys_encrypted_v1'"
-    ).get();
-    if (globalDone && globalDone.value === '1') return;
+    // Global guard via schema_migrations — avoids the NULL-semantics ambiguity
+    // of reading settings without a user_id filter.
+    if (this.isMigrationDone('api_keys_encrypted_v1')) return;
 
     for (const key of SECRET_SETTING_KEYS) {
       const rows = uid !== null
@@ -947,7 +999,10 @@ class StudyFlowDB {
         ).run(uid);
       }
     }
+    // Also record in schema_migrations so the global guard works on next launch.
+    this.markMigrationDone('api_keys_encrypted_v1');
   }
+
 
   // ═══════════════════════════════════════════════════════════════════════
   // XP & LEVELS
@@ -1788,9 +1843,104 @@ class StudyFlowDB {
     return obj;
   }
 
+  get7DayActivitySummary() {
+    const uid = this.activeUserId;
+    if (uid === null) {
+      return {
+        completedCount: 0,
+        topCompletedCategories: [],
+        pendingTasks: [],
+        overdueCount: 0,
+        focusMinutes: 0,
+        sessionCount: 0,
+        productiveHours: [],
+        existingToday: []
+      };
+    }
+
+    const completedTasks = this.db.prepare(`
+      SELECT title, category, estimated_minutes, completed_at
+      FROM tasks
+      WHERE status = 'completed' AND completed_at >= datetime('now', '-7 days') AND user_id = ?
+    `).all(uid);
+
+    const catCounts = {};
+    completedTasks.forEach(t => {
+      catCounts[t.category] = (catCounts[t.category] || 0) + 1;
+    });
+    const topCategories = Object.entries(catCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([cat, cnt]) => `${cat} (×${cnt})`);
+
+    const pendingTasks = this.db.prepare(`
+      SELECT title, category, priority, due_date, estimated_minutes
+      FROM tasks
+      WHERE status = 'pending' AND user_id = ?
+      ORDER BY CASE WHEN due_date < date('now') THEN 0 ELSE 1 END,
+               CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END
+      LIMIT 8
+    `).all(uid);
+
+    const overdueRow = this.db.prepare(`
+      SELECT COUNT(*) as count FROM tasks
+      WHERE status = 'pending' AND due_date < date('now') AND user_id = ?
+    `).get(uid);
+
+    const sessionRow = this.db.prepare(`
+      SELECT COALESCE(SUM(duration_minutes), 0) as total_minutes, COUNT(*) as session_count
+      FROM sessions
+      WHERE started_at >= datetime('now', '-7 days') AND user_id = ?
+    `).get(uid);
+
+    const hourRows = this.db.prepare(`
+      SELECT strftime('%H', started_at) as hour, COUNT(*) as count
+      FROM sessions
+      WHERE started_at >= datetime('now', '-7 days') AND user_id = ?
+      GROUP BY hour ORDER BY count DESC LIMIT 3
+    `).all(uid);
+    const productiveHours = hourRows.map(r => `${r.hour}:00`);
+
+    const existingToday = this.db.prepare(`
+      SELECT title, category, reminder_time, estimated_minutes
+      FROM tasks
+      WHERE status = 'pending' AND (due_date = date('now') OR due_date IS NULL) AND user_id = ?
+      LIMIT 6
+    `).all(uid);
+
+    return {
+      completedCount: completedTasks.length,
+      topCompletedCategories: topCategories,
+      pendingTasks: pendingTasks.map(t => ({
+        title: t.title,
+        category: t.category,
+        priority: t.priority,
+        due_date: t.due_date,
+        estimated_minutes: t.estimated_minutes
+      })),
+      overdueCount: overdueRow ? overdueRow.count : 0,
+      focusMinutes: sessionRow ? sessionRow.total_minutes : 0,
+      sessionCount: sessionRow ? sessionRow.session_count : 0,
+      productiveHours,
+      existingToday: existingToday.map(t => ({
+        title: t.title,
+        category: t.category,
+        time: t.reminder_time || 'flexible',
+        duration: t.estimated_minutes
+      }))
+    };
+  }
+
   getAIContextSummary() {
     const memory = this.getAllMemory();
     const prefs  = this.getUserPreferences();
+    const history7Days = this.get7DayActivitySummary();
+
+    const now = new Date();
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const dayOfWeek = dayNames[now.getDay()];
+    const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const currentDate = now.toISOString().slice(0, 10);
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
     const activeGoals = this.goalRepository.getGoals({ status: 'active' }).map(g => ({
       title:         g.title,
@@ -1800,7 +1950,12 @@ class StudyFlowDB {
     }));
 
     return {
-      bestFocusHours:        memory.habit_best_focus_hours      || [],
+      currentDate,
+      currentTime,
+      dayOfWeek,
+      timezone,
+      history7Days,
+      bestFocusHours:        memory.habit_best_focus_hours      || history7Days.productiveHours || [],
       productiveCategories:  memory.habit_productive_categories || [],
       skippedCategories:     memory.habit_skipped_categories    || [],
       preferredStudyHours:   memory.preferred_study_hours       || null,

@@ -160,11 +160,15 @@ class OfflineEngine {
   static generateSchedule({ hours = 4, energy = 'medium', priorities = [], startTime = '18:00' }) {
     const schedule = [];
     const [sh, sm] = (startTime || '18:00').split(':').map(Number);
-    let cur = sh * 60 + (sm || 0);
-    const isLateNight = sh >= 22 || sh < 5; // 10 PM – 5 AM: no exercise/warmup
+    let cur = (sh || 0) * 60 + (sm || 0);
+    const startHour = sh || 0;
+    const totalTargetMins = Math.max(30, Math.round((hours || 4) * 60));
+    const isLateNight = startHour >= 22 || startHour < 5;
+    const isMorning   = startHour >= 5 && startHour < 11;
+    const isAfternoon = startHour >= 11 && startHour < 16;
 
-    const studyBlock = energy === 'high' ? 60 : energy === 'low' ? 25 : 45;
-    const breakBlock = energy === 'high' ? 10 : 15;
+    const studyBlock = energy === 'high' ? 50 : energy === 'low' ? 25 : 40;
+    const breakBlock = 10;
 
     const defaults = [
       'DSA', 'Python', 'JavaScript', 'Aptitude',
@@ -180,78 +184,74 @@ class OfflineEngine {
       return `${String(h).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
     };
 
-    // Warmup block — skipped late at night (nobody needs a wake-up warmup
-    // right before bed, and it displaces time that should go to winding down).
-    if (!isLateNight) {
+    let usedMins = 0;
+    let catIdx = 0;
+    let mealScheduled = false;
+
+    // Morning warmup only if in morning and long session
+    if (isMorning && totalTargetMins >= 120) {
       schedule.push({
         time: fmt(cur),
-        activity: '☀️ Warmup & Quick Review',
+        activity: '☀️ Morning Warmup & Goals Review',
         duration: 15,
         type: 'warmup'
       });
       cur += 15;
+      usedMins += 15;
     }
 
-    const totalStudyMinutes = Math.max(30, Math.floor(hours * 60 * 0.70));
-    let used = 0;
-    let catIdx = 0;
-    let consecutiveStudy = 0;
+    while (usedMins < totalTargetMins - 15) {
+      const remaining = totalTargetMins - usedMins;
+      const curHour = Math.floor(cur / 60) % 24;
 
-    while (used < totalStudyMinutes) {
-      const remaining = totalStudyMinutes - used;
-      const blockLen = Math.min(studyBlock, remaining);
+      // Realistic meal window check (only if total session >= 3 hours and not already had a meal)
+      if (totalTargetMins >= 180 && !mealScheduled) {
+        if (curHour >= 8 && curHour <= 9 && isMorning) {
+          schedule.push({ time: fmt(cur), activity: '🍳 Breakfast & Hydrate', duration: 30, type: 'meal' });
+          cur += 30; usedMins += 30; mealScheduled = true; continue;
+        } else if (curHour >= 13 && curHour <= 14) {
+          schedule.push({ time: fmt(cur), activity: '🍲 Lunch & Short Rest', duration: 35, type: 'meal' });
+          cur += 35; usedMins += 35; mealScheduled = true; continue;
+        } else if (curHour >= 20 && curHour <= 21) {
+          schedule.push({ time: fmt(cur), activity: '🍽️ Dinner & Evening Break', duration: 35, type: 'meal' });
+          cur += 35; usedMins += 35; mealScheduled = true; continue;
+        }
+      }
+
+      // Schedule Study block
+      const blockLen = Math.min(studyBlock, remaining > studyBlock + 15 ? studyBlock : remaining);
       const cat = cats[catIdx % cats.length];
+      catIdx++;
 
       schedule.push({
         time: fmt(cur),
-        activity: `📚 ${cat}`,
+        activity: `📚 ${cat} Practice`,
         duration: blockLen,
         type: 'study'
       });
       cur += blockLen;
-      used += blockLen;
-      consecutiveStudy += blockLen;
-      catIdx++;
+      usedMins += blockLen;
 
-      if (used < totalStudyMinutes && consecutiveStudy >= studyBlock) {
+      // Insert short break between study blocks if time remains
+      if (usedMins < totalTargetMins - 20) {
         schedule.push({
           time: fmt(cur),
-          activity: '☕ Short Break',
+          activity: '☕ Short Break & Stretch',
           duration: breakBlock,
           type: 'break'
         });
         cur += breakBlock;
-        consecutiveStudy = 0;
+        usedMins += breakBlock;
       }
     }
 
-    // Exercise block — skipped late at night for the same reason as warmup.
-    if (!isLateNight) {
-      schedule.push({
-        time: fmt(cur),
-        activity: '🏃 Exercise / Walk',
-        duration: 20,
-        type: 'exercise'
-      });
-      cur += 20;
-    }
-
-    // Revision block — always the last active block, never warmup, so the
-    // session winds down into review rather than starting-feeling activity.
+    // Final closing block: calm revision / wind-down
+    const finalRemaining = Math.max(10, totalTargetMins - usedMins);
     schedule.push({
       time: fmt(cur),
-      activity: '🔁 Revision & Notes Review',
-      duration: 20,
+      activity: isLateNight ? '🌙 Notes Review & Wind Down' : '🔁 Session Revision & Summary',
+      duration: finalRemaining,
       type: 'revision'
-    });
-    cur += 20;
-
-    // Wind-down
-    schedule.push({
-      time: fmt(cur),
-      activity: '🌙 Wind Down & Plan Tomorrow',
-      duration: 10,
-      type: 'break'
     });
 
     return { schedule, provider: OfflineEngine.name };

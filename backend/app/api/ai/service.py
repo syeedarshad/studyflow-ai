@@ -34,9 +34,9 @@ from core.config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# Model names — kept here for consistent logging
-GEMINI_MODEL = "gemini-2.5-flash"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+# Model names — read from settings if available, fallback to defaults
+GEMINI_MODEL = getattr(settings, "GEMINI_MODEL", "gemini-3.6-flash")
+GROQ_MODEL = getattr(settings, "GROQ_MODEL", "openai/gpt-oss-20b")
 
 
 def _safe_error(msg: str) -> str:
@@ -45,12 +45,13 @@ def _safe_error(msg: str) -> str:
     before it is logged or returned to callers.
     Never allows key material in external-facing text.
     """
-    # Redact anything that looks like a long base64/hex/alphanumeric secret
     import re
-    # Common key patterns: AIza..., gsk_..., long hex strings
-    cleaned = re.sub(r"AIza[A-Za-z0-9_-]{30,}", "[REDACTED]", msg)
-    cleaned = re.sub(r"gsk_[A-Za-z0-9_-]{30,}", "[REDACTED]", cleaned)
-    cleaned = re.sub(r"\b[A-Za-z0-9+/]{40,}={0,2}\b", "[REDACTED]", cleaned)
+    # Common key patterns: AIza..., gsk_..., long hex/base64 strings
+    cleaned = re.sub(r"AIza[A-Za-z0-9_-]{20,}", "[REDACTED]", msg)
+    cleaned = re.sub(r"gsk_[A-Za-z0-9_-]{20,}", "[REDACTED]", cleaned)
+    cleaned = re.sub(r"\b[A-Za-z0-9+/]{35,}={0,2}\b", "[REDACTED]", cleaned)
+    # Also strip query parameters from URLs if any slipped in
+    cleaned = re.sub(r"key=[^&\s]+", "key=[REDACTED]", cleaned)
     return cleaned
 
 
@@ -62,6 +63,38 @@ class AIProviderService:
         service = AIProviderService(db)
         result = await service.generate(user_id=auth.user.id, prompt=prompt)
     """
+
+    _provider_health: dict = {
+        "gemini": {
+            "status": "configured" if settings.effective_gemini_key else "not_configured",
+            "error": None,
+        },
+        "groq": {
+            "status": "configured" if settings.effective_groq_key else "not_configured",
+            "error": None,
+        },
+    }
+
+    @classmethod
+    def get_provider_health(cls) -> dict:
+        gemini_key = bool(settings.effective_gemini_key)
+        groq_key = bool(settings.effective_groq_key)
+
+        gemini_st = cls._provider_health["gemini"]["status"] if gemini_key else "not_configured"
+        groq_st = cls._provider_health["groq"]["status"] if groq_key else "not_configured"
+
+        return {
+            "gemini": {
+                "configured": gemini_key,
+                "status": gemini_st,
+                "available": gemini_st in ("available", "configured"),
+            },
+            "groq": {
+                "configured": groq_key,
+                "status": groq_st,
+                "available": groq_st in ("available", "configured"),
+            },
+        }
 
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
@@ -109,7 +142,10 @@ class AIProviderService:
         """
         api_key = settings.effective_gemini_key
         if not api_key:
+            self._provider_health["gemini"] = {"status": "not_configured", "error": "No API key"}
             raise ValueError("Gemini API key not configured on server")
+
+        model_name = getattr(settings, "GEMINI_MODEL", GEMINI_MODEL) or "gemini-3.6-flash"
 
         generation_config: dict = {"temperature": 0.4}
         if expect_json:
@@ -120,29 +156,46 @@ class AIProviderService:
             "generationConfig": generation_config,
         }).encode()
 
-        # Use asyncio to run the blocking HTTP call in a thread pool
+        logger.info("AI provider request: provider=gemini model=%s expect_json=%s", model_name, expect_json)
+
         def _sync_call():
             import urllib.request
             import urllib.error
             url = (
                 f"https://generativelanguage.googleapis.com/v1beta/models/"
-                f"{GEMINI_MODEL}:generateContent?key={api_key}"
+                f"{model_name}:generateContent?key={api_key}"
             )
             req = urllib.request.Request(
                 url,
                 data=body,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "StudyFlow-AI/2.0",
+                },
                 method="POST",
             )
             try:
                 with urllib.request.urlopen(req, timeout=40) as resp:
                     data = json.loads(resp.read().decode())
+                AIProviderService._provider_health["gemini"] = {"status": "available", "error": None}
             except urllib.error.HTTPError as exc:
                 raw = exc.read().decode()[:200]
-                # Do NOT include the URL (contains the key)
-                raise RuntimeError(f"Gemini HTTP {exc.code}: {raw}")
+                status_code = exc.code
+                safe_detail = _safe_error(raw)
+                AIProviderService._provider_health["gemini"] = {"status": "unavailable", "error": safe_detail}
+                logger.warning(
+                    "Gemini API failure: provider=gemini model=%s status_code=%s detail=%s",
+                    model_name, status_code, safe_detail,
+                )
+                raise RuntimeError(f"Gemini HTTP {status_code}: {safe_detail}")
             except Exception as exc:
-                raise RuntimeError(f"Gemini connection error: {type(exc).__name__}")
+                err_type = type(exc).__name__
+                AIProviderService._provider_health["gemini"] = {"status": "unavailable", "error": err_type}
+                logger.warning(
+                    "Gemini connection error: provider=gemini model=%s error_type=%s",
+                    model_name, err_type,
+                )
+                raise RuntimeError(f"Gemini connection error: {err_type}")
 
             text = (
                 data.get("candidates", [{}])[0]
@@ -156,7 +209,7 @@ class AIProviderService:
             tokens = (
                 data.get("usageMetadata", {}).get("totalTokenCount")
             )
-            return {"text": text, "model": GEMINI_MODEL, "tokens_used": tokens}
+            return {"text": text, "model": model_name, "tokens_used": tokens}
 
         return await asyncio.get_event_loop().run_in_executor(None, _sync_call)
 
@@ -168,10 +221,13 @@ class AIProviderService:
         """
         api_key = settings.effective_groq_key
         if not api_key:
+            self._provider_health["groq"] = {"status": "not_configured", "error": "No API key"}
             raise ValueError("Groq API key not configured on server")
 
+        model_name = getattr(settings, "GROQ_MODEL", GROQ_MODEL) or "openai/gpt-oss-20b"
+
         body = json.dumps({
-            "model": GROQ_MODEL,
+            "model": model_name,
             "messages": [
                 {
                     "role": "system",
@@ -185,7 +241,10 @@ class AIProviderService:
             "temperature": 0.4,
         }).encode()
 
+        logger.info("AI provider request: provider=groq model=%s", model_name)
+
         def _sync_call():
+            import re
             import urllib.request
             import urllib.error
             url = "https://api.groq.com/openai/v1/chat/completions"
@@ -194,19 +253,33 @@ class AIProviderService:
                 data=body,
                 headers={
                     "Content-Type": "application/json",
-                    # Key never logged — only passed in header
                     "Authorization": f"Bearer {api_key}",
+                    "User-Agent": "StudyFlow-AI/2.0",
                 },
                 method="POST",
             )
             try:
                 with urllib.request.urlopen(req, timeout=20) as resp:
                     data = json.loads(resp.read().decode())
+                AIProviderService._provider_health["groq"] = {"status": "available", "error": None}
             except urllib.error.HTTPError as exc:
                 raw = exc.read().decode()[:200]
-                raise RuntimeError(f"Groq HTTP {exc.code}: {raw}")
+                status_code = exc.code
+                safe_detail = _safe_error(raw)
+                AIProviderService._provider_health["groq"] = {"status": "unavailable", "error": safe_detail}
+                logger.warning(
+                    "Groq API failure: provider=groq model=%s status_code=%s detail=%s",
+                    model_name, status_code, safe_detail,
+                )
+                raise RuntimeError(f"Groq HTTP {status_code}: {safe_detail}")
             except Exception as exc:
-                raise RuntimeError(f"Groq connection error: {type(exc).__name__}")
+                err_type = type(exc).__name__
+                AIProviderService._provider_health["groq"] = {"status": "unavailable", "error": err_type}
+                logger.warning(
+                    "Groq connection error: provider=groq model=%s error_type=%s",
+                    model_name, err_type,
+                )
+                raise RuntimeError(f"Groq connection error: {err_type}")
 
             text = (
                 data.get("choices", [{}])[0]
@@ -216,10 +289,13 @@ class AIProviderService:
             if not text:
                 raise RuntimeError("Groq returned empty content")
 
+            # Strip reasoning tags if model output includes <think>...</think>
+            text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
+
             tokens = (
                 data.get("usage", {}).get("total_tokens")
             )
-            return {"text": text, "model": GROQ_MODEL, "tokens_used": tokens}
+            return {"text": text, "model": model_name, "tokens_used": tokens}
 
         return await asyncio.get_event_loop().run_in_executor(None, _sync_call)
 
@@ -240,14 +316,15 @@ class AIProviderService:
           2. Try Gemini (primary)
           3. Try Groq on Gemini failure (fallback)
           4. Log the result to ai_usage_logs
-          5. Return { success, text, provider, model, tokens_used }
-
-        On complete failure (both providers down / no keys):
-          - Returns a safe error response rather than raising
-          - Logs the failure without exposing credentials
+          5. Return { success, text, provider, model, offline, fallback_used, tokens_used }
         """
         # 1. Quota check
         await self.check_and_reserve_quota(user_id)
+
+        logger.info(
+            "AI generation started: user_id=%s feature=%s",
+            user_id, feature or "unknown",
+        )
 
         # 1.1 Retrieve user-specific personal RAG context
         enriched_prompt = prompt
@@ -255,7 +332,6 @@ class AIProviderService:
             from app.services.rag_service import rag_service
             rag_chunks = await rag_service.retrieve(user_id=user_id, query=prompt, top_k=3)
             if rag_chunks:
-                # Deduplicate and enforce max context character budget
                 seen_content = set()
                 bounded_chunks = []
                 total_chars = 0
@@ -293,9 +369,10 @@ class AIProviderService:
         error_code: Optional[str] = None
         result_text: str = ""
         success = False
+        fallback_used = False
         errors = []
 
-        # 2. Try Gemini
+        # 2. Try Gemini (Primary)
         try:
             result = await self._call_gemini(enriched_prompt, expect_json=expect_json)
             result_text = result["text"]
@@ -303,16 +380,22 @@ class AIProviderService:
             model_used = result.get("model")
             tokens_used = result.get("tokens_used")
             success = True
+            fallback_used = False
+            logger.info(
+                "Primary provider succeeded: provider=gemini model=%s tokens=%s",
+                model_used, tokens_used,
+            )
         except Exception as exc:
             safe_msg = _safe_error(str(exc))
             logger.warning(
-                "Gemini failed for user_id=%s feature=%s: %s",
+                "Primary provider failed for user_id=%s feature=%s: %s",
                 user_id, feature, safe_msg,
             )
             errors.append(f"Gemini: {safe_msg}")
 
-        # 3. Try Groq (fallback)
+        # 3. Try Groq (Fallback if Gemini failed)
         if not success:
+            logger.info("Attempting fallback provider: provider=groq user_id=%s", user_id)
             try:
                 result = await self._call_groq(enriched_prompt)
                 result_text = result["text"]
@@ -320,39 +403,45 @@ class AIProviderService:
                 model_used = result.get("model")
                 tokens_used = result.get("tokens_used")
                 success = True
+                fallback_used = True
+                logger.info(
+                    "Fallback provider succeeded: provider=groq model=%s tokens=%s",
+                    model_used, tokens_used,
+                )
             except Exception as exc:
                 safe_msg = _safe_error(str(exc))
                 logger.warning(
-                    "Groq failed for user_id=%s feature=%s: %s",
+                    "Fallback provider failed for user_id=%s feature=%s: %s",
                     user_id, feature, safe_msg,
                 )
                 errors.append(f"Groq: {safe_msg}")
 
-        # 4. Log the result
+        # 4. Log the result to ai_usage_logs (Single unified record — no double counting)
         if not success:
             error_code = "provider_error" if any(
                 "HTTP" in e or "connection" in e for e in errors
             ) else "no_key_configured"
+            logger.warning(
+                "All AI providers failed: user_id=%s feature=%s error_code=%s. Returning offline response.",
+                user_id, feature or "unknown", error_code,
+            )
 
         await self.repo.log_request(
             user_id=user_id,
-            provider=provider_used,
+            provider=provider_used or "offline",
             model=model_used,
             success=success,
             tokens_used=tokens_used,
             error_code=error_code if not success else None,
         )
 
-        logger.info(
-            "AI request user_id=%s feature=%s provider=%s success=%s tokens=%s",
-            user_id, feature or "unknown", provider_used, success, tokens_used,
-        )
-
         return {
             "success": success,
             "text": result_text,
-            "provider": provider_used or "none",
+            "provider": provider_used or "offline",
             "model": model_used,
+            "offline": not success,
+            "fallback_used": fallback_used or (not success),
             "tokens_used": tokens_used,
             "error": "AI service temporarily unavailable." if not success else None,
         }
