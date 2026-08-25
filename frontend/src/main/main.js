@@ -236,8 +236,8 @@ function createMainWindow(startPage = 'index.html') {
     minWidth:        900,
     minHeight:       600,
     backgroundColor: '#080808',
-    titleBarStyle:   'hiddenInset',
-    frame:           false,
+    frame:           true,
+    autoHideMenuBar: true,
     show:            false,
     icon:            iconPath,
     webPreferences: {
