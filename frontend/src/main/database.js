@@ -2549,14 +2549,14 @@ class StudyFlowDB {
   savePlan(date, availableHours, energyLevel, schedule) {
     const uid = this.activeUserId;
     if (uid !== null) {
-      const existing = this.db.prepare('SELECT 1 FROM planner_entries WHERE date = ? AND user_id = ?').get(date, uid);
+      const existing = this.db.prepare('SELECT id FROM planner_entries WHERE date = ? AND (user_id = ? OR user_id IS NULL)').get(date, uid);
       if (existing) {
         return this.db.prepare(`
-          UPDATE planner_entries SET available_hours = ?, energy_level = ?, schedule = ? WHERE date = ? AND user_id = ?
-        `).run(availableHours, energyLevel, JSON.stringify(schedule), date, uid);
+          UPDATE planner_entries SET available_hours = ?, energy_level = ?, schedule = ?, user_id = ? WHERE id = ?
+        `).run(availableHours, energyLevel, JSON.stringify(schedule), uid, existing.id);
       }
       return this.db.prepare(`
-        INSERT INTO planner_entries (date, available_hours, energy_level, schedule, user_id)
+        INSERT OR REPLACE INTO planner_entries (date, available_hours, energy_level, schedule, user_id)
         VALUES (?, ?, ?, ?, ?)
       `).run(date, availableHours, energyLevel, JSON.stringify(schedule), uid);
     }

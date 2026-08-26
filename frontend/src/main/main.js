@@ -25,6 +25,22 @@ if (process.platform === 'win32') {
   app.setAppUserModelId('com.studyflow.ai');
 }
 
+// ─── Single-Instance Lock ──────────────────────────────────────────────
+const gotTheLock = app.requestSingleInstanceLock();
+
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (event, commandLine, workingDirectory) => {
+    // Someone tried to run a second instance, focus our main window
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      if (!mainWindow.isVisible()) mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+}
+
 /**
  * Resolves the application icon robustly across development and packaged builds.
  * Uses .ico on Windows for crisp taskbar/Alt+Tab/window icons at all scales.
@@ -71,90 +87,91 @@ let currentUser = null; // { id, full_name, email } — set on login/auto-login,
 // APP LIFECYCLE
 // ═══════════════════════════════════════════════════════════════════════
 
-app.whenReady().then(() => {
-  try {
-    db         = new Database();
-    aiProvider = new ProviderManager(db);
+if (gotTheLock) {
+  app.whenReady().then(() => {
+    try {
+      db         = new Database();
+      aiProvider = new ProviderManager(db);
 
-    // ─── Auth gate: decide login screen vs. straight-to-dashboard ──────
-    // Phase 1 check: local SQLite session (legacy / offline path).
-    // Phase 2 check: FastAPI backend session token stored in electron-store.
-    // Either a valid local session OR a stored backend token sends the user
-    // straight to index.html — the renderer validates the backend token on load.
-    let startPage = 'login.html';
+      // ─── Auth gate: decide login screen vs. straight-to-dashboard ──────
+      // Phase 1 check: local SQLite session (legacy / offline path).
+      // Phase 2 check: FastAPI backend session token stored in electron-store.
+      // Either a valid local session OR a stored backend token sends the user
+      // straight to index.html — the renderer validates the backend token on load.
+      let startPage = 'login.html';
 
-    const authSession = sessionManager.getSession();
-    if (authSession) {
-      const user = db.userRepository.getById(authSession.userId);
-      if (user) {
-        currentUser = user;
-        db.setActiveUser(user.id);
-        startPage = 'index.html';
-        logger.authEvent('auto-login from local persisted session', user.id);
-      } else {
-        // Session pointed at an account that no longer exists — clear it.
-        sessionManager.clearSession();
-      }
-    }
-
-    // Phase 2: also check for a stored FastAPI backend session token.
-    // If one is present, the renderer-side AuthGateway will validate it
-    // against the backend and navigate accordingly — we just need to land
-    // on index.html so the validation call can happen.
-    if (startPage === 'login.html') {
-      try {
-        const { decrypt } = require('./secure-store');
-        const Store = require('electron-store');
-        const tokenStore = new Store({ name: 'backend-session' });
-        const encrypted = tokenStore.get('token');
-        if (encrypted) {
-          const token = decrypt(encrypted);
-          if (token) {
-            startPage = 'index.html';
-            logger.authEvent('auto-login from backend session token (will validate on renderer)');
-          }
+      const authSession = sessionManager.getSession();
+      if (authSession) {
+        const user = db.userRepository.getById(authSession.userId);
+        if (user) {
+          currentUser = user;
+          db.setActiveUser(user.id);
+          startPage = 'index.html';
+          logger.authEvent('auto-login from local persisted session', user.id);
+        } else {
+          // Session pointed at an account that no longer exists — clear it.
+          sessionManager.clearSession();
         }
-      } catch (err) {
-        // Non-fatal — just show login screen if token can't be read
-        logger.ipcError('startup backend-session check', err);
       }
+
+      // Phase 2: also check for a stored FastAPI backend session token.
+      // If one is present, the renderer-side AuthGateway will validate it
+      // against the backend and navigate accordingly — we just need to land
+      // on index.html so the validation call can happen.
+      if (startPage === 'login.html') {
+        try {
+          const { decrypt } = require('./secure-store');
+          const Store = require('electron-store');
+          const tokenStore = new Store({ name: 'backend-session' });
+          const encrypted = tokenStore.get('token');
+          if (encrypted) {
+            const token = decrypt(encrypted);
+            if (token) {
+              startPage = 'index.html';
+              logger.authEvent('auto-login from backend session token (will validate on renderer)');
+            }
+          }
+        } catch (err) {
+          // Non-fatal — just show login screen if token can't be read
+          logger.ipcError('startup backend-session check', err);
+        }
+      }
+
+      createMainWindow(startPage);
+      createTray();
+      setupIPC();
+
+      // Allow microphone access for the onboarding voice-input feature
+      // (Web Speech API / SpeechRecognition in the renderer needs this —
+      // Electron denies media permission requests by default otherwise).
+      session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+        callback(permission === 'media');
+      });
+
+      logger.info('StudyFlow AI started successfully.');
+    } catch (err) {
+      logger.startupError('app.whenReady', err);
+      // Surface it somewhere visible rather than a silent, invisible crash.
+      console.error('Fatal startup error:', err);
     }
+  });
 
+  process.on('uncaughtException', (err) => {
+    logger.startupError('uncaughtException', err);
+  });
+  process.on('unhandledRejection', (reason) => {
+    logger.startupError('unhandledRejection', reason instanceof Error ? reason : new Error(String(reason)));
+  });
 
-    createMainWindow(startPage);
-    createTray();
-    setupIPC();
+  app.on('window-all-closed', (e) => {
+    // Keep the app running in the tray — don't quit on window close
+    e.preventDefault();
+  });
 
-    // Allow microphone access for the onboarding voice-input feature
-    // (Web Speech API / SpeechRecognition in the renderer needs this —
-    // Electron denies media permission requests by default otherwise).
-    session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-      callback(permission === 'media');
-    });
-
-    logger.info('StudyFlow AI started successfully.');
-  } catch (err) {
-    logger.startupError('app.whenReady', err);
-    // Surface it somewhere visible rather than a silent, invisible crash.
-    console.error('Fatal startup error:', err);
-  }
-});
-
-process.on('uncaughtException', (err) => {
-  logger.startupError('uncaughtException', err);
-});
-process.on('unhandledRejection', (reason) => {
-  logger.startupError('unhandledRejection', reason instanceof Error ? reason : new Error(String(reason)));
-});
-
-app.on('window-all-closed', (e) => {
-  // Keep the app running in the tray — don't quit on window close
-  e.preventDefault();
-});
-
-app.on('activate', () => {
-  if (mainWindow) mainWindow.show();
-});
+  app.on('activate', () => {
+    if (mainWindow) mainWindow.show();
+  });
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // WINDOW CREATION

@@ -199,32 +199,136 @@ class ProviderManager {
 
   /**
    * Deterministically validates and normalizes schedule blocks to eliminate
-   * time overlaps, fix impossible meal hours, sanitize durations, and enforce
-   * strict chronological continuity.
+   * consecutive breaks, eliminate time overlaps, fix impossible meal hours,
+   * sanitize durations, repair repetitive AI output, and enforce strict
+   * chronological continuity.
    */
   static validateAndNormalizeSchedule(rawSchedule, startTime = '18:00', totalHours = 4) {
     if (!Array.isArray(rawSchedule) || rawSchedule.length === 0) return [];
 
     const [startH, startM] = String(startTime || '18:00').split(':').map(Number);
     let currentTotalMins = (startH || 0) * 60 + (startM || 0);
-    const maxTotalMins = currentTotalMins + Math.round((totalHours || 4) * 60);
+    const maxTotalMins = currentTotalMins + Math.max(30, Math.round((totalHours || 4) * 60));
 
     const validTypes = ['study', 'break', 'meal', 'exercise', 'revision', 'warmup'];
-    const normalized = [];
-    const seenActivities = new Set();
+    const defaultStudyPool = [
+      'DSA Practice',
+      'Python Practice',
+      'JavaScript Practice',
+      'Core Problem Solving',
+      'Project Work',
+      'Revision & Notes'
+    ];
+    let poolIdx = 0;
 
+    // Helper to identify break-type blocks
+    const isBreakBlock = (b) => {
+      if (!b) return false;
+      const type = String(b.type || '').toLowerCase();
+      const act = String(b.activity || '').toLowerCase();
+      return type === 'break' || act.includes('short break') || act.includes('stretch break') || (act.includes('break') && !act.includes('breakfast'));
+    };
+
+    // ── Phase 1: Pre-sanitize raw items ─────────────────────────────────
+    const sanitized = [];
     for (const b of rawSchedule) {
       if (!b || typeof b !== 'object') continue;
-      if (currentTotalMins >= maxTotalMins && normalized.length >= 2) break;
-
       let activity = String(b.activity || '').trim();
       if (!activity) continue;
 
       let duration = Number.isFinite(b.duration) ? Math.max(5, Math.min(180, Math.round(b.duration))) : 30;
       let type = validTypes.includes(b.type) ? b.type : 'study';
 
-      const curH = Math.floor(currentTotalMins / 60) % 24;
-      const curM = currentTotalMins % 60;
+      if (isBreakBlock({ type, activity })) {
+        type = 'break';
+        duration = Math.min(25, duration);
+      }
+
+      sanitized.push({ activity, duration, type });
+    }
+
+    if (sanitized.length === 0) return [];
+
+    // ── Phase 2: Remove leading break blocks ─────────────────────────────
+    while (sanitized.length > 0 && isBreakBlock(sanitized[0])) {
+      sanitized.shift();
+    }
+
+    // If all blocks were breaks, create a default study block
+    if (sanitized.length === 0) {
+      sanitized.push({ activity: '📚 Focused Study Session', duration: 45, type: 'study' });
+    }
+
+    // ── Phase 3: Consecutive break resolution & AI repetition repair ─────
+    const pass1 = [];
+    const seenActivities = new Set();
+
+    for (let i = 0; i < sanitized.length; i++) {
+      const b = sanitized[i];
+      const isBreak = isBreakBlock(b);
+      const prev = pass1.length > 0 ? pass1[pass1.length - 1] : null;
+      const prevIsBreak = prev ? isBreakBlock(prev) : false;
+
+      if (isBreak && prevIsBreak) {
+        // Consecutive break detected!
+        // If the previous break was very short (< 15 min), merge up to 15 min
+        if (prev.duration < 15) {
+          prev.duration = Math.min(15, prev.duration + b.duration);
+        }
+
+        // Instead of duplicate break, if session still has time, replace with productive study
+        const currentElapsed = pass1.reduce((sum, item) => sum + item.duration, 0);
+        if (currentTotalMins + currentElapsed + 30 <= maxTotalMins) {
+          const productiveName = defaultStudyPool[poolIdx % defaultStudyPool.length];
+          poolIdx++;
+          pass1.push({
+            activity: `💻 ${productiveName}`,
+            duration: 35,
+            type: 'study'
+          });
+        }
+        // Otherwise ignore the redundant break
+        continue;
+      }
+
+      // If it's a study block, repair repetitive AI output
+      if (b.type === 'study') {
+        const normKey = b.activity.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (seenActivities.has(normKey)) {
+          const alt = defaultStudyPool[poolIdx % defaultStudyPool.length];
+          poolIdx++;
+          b.activity = `📚 ${alt}`;
+        }
+        seenActivities.add(b.activity.toLowerCase().replace(/[^a-z0-9]/g, ''));
+      }
+
+      pass1.push(b);
+    }
+
+    // ── Phase 4: Trailing break resolution ───────────────────────────────
+    if (pass1.length > 1) {
+      const last = pass1[pass1.length - 1];
+      if (isBreakBlock(last)) {
+        const curH = Math.floor(currentTotalMins / 60) % 24;
+        last.activity = (curH >= 22 || curH < 5) ? '🌙 Notes Review & Wind Down' : '🔁 Session Revision & Summary';
+        last.type = 'revision';
+        last.duration = Math.max(10, last.duration);
+      }
+    }
+
+    // ── Phase 5: Timing, meals, late-night workout & chronological sequence
+    const normalized = [];
+    let rollingMins = currentTotalMins;
+
+    for (const b of pass1) {
+      if (rollingMins >= maxTotalMins && normalized.length >= 2) break;
+
+      let activity = b.activity;
+      let duration = b.duration;
+      let type = b.type;
+
+      const curH = Math.floor(rollingMins / 60) % 24;
+      const curM = rollingMins % 60;
       const timeStr = `${String(curH).padStart(2, '0')}:${String(curM).padStart(2, '0')}`;
 
       // Meal and routine sanity checks
@@ -255,13 +359,6 @@ class ProviderManager {
         type = 'revision';
       }
 
-      // Deduplication check
-      const normKey = activity.toLowerCase().replace(/[^a-z0-9]/g, '');
-      if (seenActivities.has(normKey) && type !== 'break' && type !== 'revision') {
-        continue;
-      }
-      seenActivities.add(normKey);
-
       normalized.push({
         time: timeStr,
         activity,
@@ -269,7 +366,7 @@ class ProviderManager {
         type
       });
 
-      currentTotalMins += duration;
+      rollingMins += duration;
     }
 
     return normalized;

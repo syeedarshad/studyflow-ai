@@ -502,12 +502,25 @@ function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', safeTheme);
 }
 
-// ─── Provider label helper (Offline Mode badge) ───────────────────────────────
+// ─── Unified AI Provider Label Helper (Jass AI) ───────────────────────────
 function formatProviderLabel(provider) {
   const clean = (provider || '').toLowerCase().trim();
-  if (clean === 'gemini') return 'with Gemini';
-  if (clean === 'groq') return 'with Groq fallback';
-  return 'offline';
+  if (clean === 'offline' || clean === 'local' || clean === 'none' || !clean) return 'by Jass AI • Local mode';
+  return 'by Jass AI';
+}
+
+function formatAIProviderLabel(provider) {
+  return formatProviderLabel(provider);
+}
+
+// ─── AI Generation Review Notice Helper ────────────────────────────────────
+function renderAIReviewNotice() {
+  return `
+    <div class="ai-review-notice">
+      <span class="notice-icon">ⓘ</span>
+      <span>Jass AI can make mistakes. Please review and edit the timeline before saving.</span>
+    </div>
+  `;
 }
 
 // ─── Greeting helpers ──────────────────────────────────────────────────────────────
@@ -1127,8 +1140,8 @@ async function generateTaskPlanPreview(prompt, btn) {
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Thinking...'; }
   try {
     const res = await window.studyflow.planPreviewTasks(prompt);
-    if (!res.success) { toast(res.error || 'AI request failed. Check your API keys in Settings.', 'error'); return; }
-    if (!res.plan?.payload?.length) { toast('AI could not extract any tasks. Try rephrasing.', 'info'); return; }
+    if (!res.success) { toast(res.error || 'Jass AI is temporarily unavailable. Please try again.', 'error'); return; }
+    if (!res.plan?.payload?.length) { toast('Jass AI could not extract any tasks. Try rephrasing.', 'info'); return; }
     showTaskPlanApproval(res.plan, prompt);
   } catch (err) { toast('Something went wrong generating tasks.', 'error'); }
   finally { if (btn) { btn.disabled = false; btn.textContent = '✨ Generate Tasks'; } }
@@ -1211,10 +1224,11 @@ function showTaskPlanApproval(plan, originalPrompt) {
   `).join('');
 
   showModal('🤖 AI Plan Preview', `
-    <div class="ai-thinking" style="margin-bottom:10px">
+    <div class="ai-thinking" style="margin-bottom:8px">
       <span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span>
       <span style="margin-left:4px">Generated ${formatProviderLabel(plan.provider)} — customize before adding</span>
     </div>
+    ${renderAIReviewNotice()}
     <div class="grid-3" style="gap:10px;margin-bottom:14px">
       <div class="stat-card" style="padding:12px">
         <div class="stat-label">Est. Study Time</div>
@@ -1339,7 +1353,26 @@ async function acceptPlan(planId) {
         toast('❌ Failed to add tasks to your task list.', 'error');
       }
     } else if (editedSchedule.length > 0 || res.plan?.type === 'schedule') {
-      const scheduleToSave = editedSchedule.length > 0 ? editedSchedule : (res.plan?.payload || []);
+      let scheduleToSave = editedSchedule.length > 0 ? editedSchedule : (res.plan?.payload || []);
+      // Sanitize edited schedule to avoid consecutive/leading/trailing breaks
+      if (Array.isArray(scheduleToSave) && scheduleToSave.length > 0) {
+        const cleaned = [];
+        for (let i = 0; i < scheduleToSave.length; i++) {
+          const b = scheduleToSave[i];
+          const isBreak = b.type === 'break' || String(b.activity || '').toLowerCase().includes('break');
+          const prev = cleaned.length > 0 ? cleaned[cleaned.length - 1] : null;
+          const prevIsBreak = prev && (prev.type === 'break' || String(prev.activity || '').toLowerCase().includes('break'));
+          if (isBreak && prevIsBreak) {
+            prev.duration = Math.min(20, (prev.duration || 15) + (b.duration || 15));
+            continue;
+          }
+          cleaned.push(b);
+        }
+        while (cleaned.length > 0 && (cleaned[0].type === 'break' || String(cleaned[0].activity || '').toLowerCase().includes('break'))) {
+          cleaned.shift();
+        }
+        if (cleaned.length > 0) scheduleToSave = cleaned;
+      }
       const todayStr = new Date().toISOString().slice(0, 10);
       await window.studyflow.db('savePlan', todayStr, null, null, scheduleToSave);
       toast(`✨ Schedule saved — ${scheduleToSave.length} block(s) added!`, 'success');
@@ -2232,7 +2265,7 @@ function removeSchedPlanItem(idx) {
 }
 
 function addSchedPlanItem() {
-  const list = document.querySelector('.schedule-preview-list');
+  const list = document.querySelector('.schedule-preview-list > div') || document.querySelector('.schedule-preview-list');
   if (!list) return;
   const newIdx = Date.now();
   const now = new Date();
@@ -2241,7 +2274,7 @@ function addSchedPlanItem() {
     <div class="schedule-preview-item editable" data-idx="${newIdx}" style="display:flex;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
       <input class="form-input sched-item-time" type="time" value="${timeStr}" style="width:90px;padding:4px 6px;font-size:12px">
       <input class="form-input sched-item-activity" value="Custom Study Block" placeholder="Activity" style="flex:1;padding:4px 8px;font-size:13px">
-      <input class="form-input sched-item-duration" type="number" value="30" min="5" max="180" style="width:65px;padding:4px 6px;font-size:12px" title="Duration in minutes">m
+      <input class="form-input sched-item-duration" type="number" value="30" min="5" max="180" style="width:65px;padding:4px 6px;font-size:12px;text-align:center" title="Duration in minutes">m
       <select class="form-select sched-item-type" style="width:95px;padding:4px 6px;font-size:12px">
         <option value="study" selected>Study</option>
         <option value="break">Break</option>
@@ -2258,18 +2291,21 @@ function addSchedPlanItem() {
 
 function showSchedulePlanApproval(plan) {
   showModal('📅 AI Schedule Preview', `
-    <div class="ai-thinking" style="margin-bottom:10px">
-      <span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span>
-      <span style="margin-left:4px">Generated ${formatProviderLabel(plan.provider)} — customize before saving</span>
+    <div class="modal-content-scrollable">
+      <div class="ai-thinking" style="margin-bottom:8px">
+        <span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span>
+        <span style="margin-left:4px">Generated ${formatProviderLabel(plan.provider)} — customize before saving</span>
+      </div>
+      ${renderAIReviewNotice()}
+      <div style="font-size:12px;color:var(--text-3);margin-bottom:8px">Review, re-order, or edit schedule blocks below:</div>
+      <div class="schedule-preview-list">
+        ${renderSchedule(plan.payload)}
+      </div>
+      <div style="margin-top:12px;margin-bottom:4px">
+        <button class="btn btn-ghost btn-sm" data-action="addSchedPlanItem">＋ Add Block</button>
+      </div>
     </div>
-    <div style="font-size:12px;color:var(--text-3);margin-bottom:6px">Review, re-order, or edit schedule blocks below:</div>
-    <div class="schedule-preview-list" style="max-height:300px;overflow-y:auto;margin:10px 0">
-      ${renderSchedule(plan.payload)}
-    </div>
-    <div style="margin-bottom:14px">
-      <button class="btn btn-ghost btn-sm" data-action="addSchedPlanItem">＋ Add Block</button>
-    </div>
-    <div class="plan-actions">
+    <div class="modal-footer-fixed plan-actions">
       <button class="btn btn-ghost"     data-action="regenerateSchedule">↺ Regenerate</button>
       <button class="btn btn-secondary" data-action="closeModal">Cancel</button>
       <button class="btn btn-primary"   data-action="acceptPlan" data-plan-id="${plan.id}">✓ Save Schedule</button>
@@ -2297,7 +2333,7 @@ function renderSchedule(schedule) {
       <div class="schedule-preview-item editable" data-idx="${i}" style="display:flex;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
         <input class="form-input sched-item-time" type="time" value="${b.time || '18:00'}" style="width:90px;padding:4px 6px;font-size:12px">
         <input class="form-input sched-item-activity" value="${escapeHTML(b.activity || '')}" placeholder="Activity" style="flex:1;padding:4px 8px;font-size:13px">
-        <input class="form-input sched-item-duration" type="number" value="${b.duration || 30}" min="5" max="180" style="width:65px;padding:4px 6px;font-size:12px" title="Duration in minutes">m
+        <input class="form-input sched-item-duration" type="number" value="${b.duration || 30}" min="5" max="180" style="width:65px;padding:4px 6px;font-size:12px;text-align:center" title="Duration in minutes">m
         <select class="form-select sched-item-type" style="width:95px;padding:4px 6px;font-size:12px">
           <option value="study" ${b.type === 'study' ? 'selected' : ''}>Study</option>
           <option value="break" ${b.type === 'break' ? 'selected' : ''}>Break</option>
@@ -2710,10 +2746,11 @@ function inferSessionCategory(prompt) {
 function showQuickSessionApproval(res) {
   const { segments, provider } = res;
   showModal('⚡ Quick Session Plan', `
-    <div class="ai-thinking" style="margin-bottom:12px">
+    <div class="ai-thinking" style="margin-bottom:8px">
       <span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span>
       <span style="margin-left:4px">Generated ${formatProviderLabel(provider)}</span>
     </div>
+    ${renderAIReviewNotice()}
     
     <div class="plan-preview-list" style="margin-bottom:16px">
       ${segments.map(s => `
@@ -2915,10 +2952,11 @@ function showGoalPlanApproval(plan) {
   `;
 
   showModal('🤖 AI Goal Plan Preview', `
-    <div class="ai-thinking" style="margin-bottom:10px">
+    <div class="ai-thinking" style="margin-bottom:8px">
       <span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span>
       <span style="margin-left:4px">Generated ${formatProviderLabel(plan.provider)} — review before adding</span>
     </div>
+    ${renderAIReviewNotice()}
     <div class="grid-3" style="gap:10px;margin-bottom:14px">
       <div class="stat-card" style="padding:12px"><div class="stat-label">Goal</div><div class="stat-value" style="font-size:14px;line-height:1.3">${escapeHTML(goalData.title)}</div></div>
       <div class="stat-card accent-2" style="padding:12px"><div class="stat-label">Deadline</div><div class="stat-value" style="font-size:20px">${deadlineDays}d</div></div>
@@ -3130,10 +3168,11 @@ async function generateRoadmapPreview() {
 function showRoadmapApproval(plan) {
   const { milestones } = plan.payload;
   showModal('🗺️ Career Roadmap Preview', `
-    <div class="ai-thinking" style="margin-bottom:12px">
+    <div class="ai-thinking" style="margin-bottom:8px">
       <span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span>
       <span style="margin-left:4px">Generated ${formatProviderLabel(plan.provider)} — review before saving</span>
     </div>
+    ${renderAIReviewNotice()}
     <div style="max-height:400px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;margin-bottom:14px">
       ${milestones.map(m => `
         <div style="background:var(--surface-2);border-radius:var(--radius-sm);padding:12px 14px">
@@ -3259,10 +3298,11 @@ async function generateExamPlanPreview() {
 function showExamPlanApproval(plan, summary) {
   const { plan: examPlan, tasks } = plan.payload;
   showModal('📝 Exam Prep Plan Preview', `
-    <div class="ai-thinking" style="margin-bottom:12px">
+    <div class="ai-thinking" style="margin-bottom:8px">
       <span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span>
       <span style="margin-left:4px">Generated ${formatProviderLabel(plan.provider)}</span>
     </div>
+    ${renderAIReviewNotice()}
     <div class="plan-preview-summary">${summary||examPlan?.overview||''}</div>
     ${examPlan?.daily_plan?.length ? `
       <div class="form-label" style="margin-bottom:6px">Daily Activities</div>
@@ -3598,10 +3638,11 @@ async function generateSemesterPlan() {
 function showSemesterPlanApproval(plan, overview) {
   const { roadmap, tasks } = plan.payload;
   showModal('🎓 Semester Plan Preview', `
-    <div class="ai-thinking" style="margin-bottom:12px">
+    <div class="ai-thinking" style="margin-bottom:8px">
       <span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span><span class="ai-thinking-dot"></span>
       <span style="margin-left:4px">Generated ${formatProviderLabel(plan.provider)}</span>
     </div>
+    ${renderAIReviewNotice()}
     <div class="plan-preview-summary">${overview||roadmap?.overview||''}</div>
     ${roadmap?.weekly_themes?.slice(0,4).length ? `
       <div class="form-label" style="margin-bottom:6px">First 4 Weeks</div>
@@ -4671,9 +4712,9 @@ async function renderSettings(container) {
     <div class="card" id="settings-section-ai" style="max-width:680px;margin-bottom:16px;padding:20px 22px">
       <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;font-size:14px;margin-bottom:6px">
         <span>🤖 AI Services</span>
-        <span style="font-size:10.5px;color:var(--accent);background:rgba(201,168,76,0.1);padding:3px 8px;border-radius:12px;border:1px solid rgba(201,168,76,0.25)">Server-Managed</span>
+        <span style="font-size:10.5px;color:var(--accent);background:rgba(201,168,76,0.1);padding:3px 8px;border-radius:12px;border:1px solid rgba(201,168,76,0.25)">Managed by StudyFlow AI</span>
       </div>
-      <div style="font-size:12px;color:var(--text-3);margin-bottom:14px">AI models are powered and managed automatically by the StudyFlow AI backend.</div>
+      <div style="font-size:12px;color:var(--text-3);margin-bottom:14px">Your AI features are powered automatically by Jass AI.</div>
       
       <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
         <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--bg-2, rgba(255,255,255,0.03));border-radius:8px">
@@ -4681,23 +4722,16 @@ async function renderSettings(container) {
           <span style="font-weight:600;color:var(--text-1)">Managed by StudyFlow AI</span>
         </div>
         <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--bg-2, rgba(255,255,255,0.03));border-radius:8px">
-          <span style="color:var(--text-2)">Gemini (Primary)</span>
+          <span style="color:var(--text-2)">Jass AI</span>
           ${(() => {
-            const st = geminiStatus.status || (geminiStatus.configured ? 'configured' : 'not_configured');
-            if (st === 'available') return '<span style="font-weight:600;color:var(--success)">● Available</span>';
-            if (st === 'configured') return '<span style="font-weight:600;color:var(--accent)">● Configured</span>';
-            if (st === 'unavailable') return '<span style="font-weight:600;color:var(--danger, #e57373)">○ Unavailable</span>';
-            return '<span style="font-weight:600;color:var(--text-3)">○ Not Configured</span>';
-          })()}
-        </div>
-        <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--bg-2, rgba(255,255,255,0.03));border-radius:8px">
-          <span style="color:var(--text-2)">Groq (Fallback)</span>
-          ${(() => {
-            const st = groqStatus.status || (groqStatus.configured ? 'configured' : 'not_configured');
-            if (st === 'available') return '<span style="font-weight:600;color:var(--success)">● Available</span>';
-            if (st === 'configured') return '<span style="font-weight:600;color:var(--accent)">● Configured</span>';
-            if (st === 'unavailable') return '<span style="font-weight:600;color:var(--danger, #e57373)">○ Unavailable</span>';
-            return '<span style="font-weight:600;color:var(--text-3)">○ Not Configured</span>';
+            const providerData = providersRes?.data?.providers || providersRes?.providers || (Array.isArray(providersRes?.data) ? providersRes.data : []);
+            const geminiStatus = providerData.find(p => p.provider === 'gemini') || { configured: false };
+            const groqStatus   = providerData.find(p => p.provider === 'groq')   || { configured: false };
+            const isGeminiReady = geminiStatus.status === 'available' || (geminiStatus.status !== 'unavailable' && geminiStatus.configured);
+            const isGroqReady   = groqStatus.status === 'available'   || (groqStatus.status !== 'unavailable' && groqStatus.configured);
+            if (isGeminiReady || isGroqReady) return '<span style="font-weight:600;color:var(--success)">● Ready</span>';
+            if (geminiStatus.configured || groqStatus.configured) return '<span style="font-weight:600;color:var(--accent)">● Configured</span>';
+            return '<span style="font-weight:600;color:var(--accent)">● Local mode</span>';
           })()}
         </div>
         <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--bg-2, rgba(255,255,255,0.03));border-radius:8px">

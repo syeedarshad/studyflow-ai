@@ -65,8 +65,8 @@ MAX_UPLOAD_SIZE_MB=50
 
 # ─── AI Providers (Server-Managed) ───────────────────────────────────────────
 # At least one provider key is required for AI Coach, Roadmap, and RAG features
-GEMINI_API_KEY=AIzaSy...
-GROQ_API_KEY=gsk_...
+GEMINI_API_KEY=your_gemini_api_key_here
+GROQ_API_KEY=your_groq_api_key_here
 AI_DAILY_REQUEST_LIMIT=50
 
 # ─── Email Configuration (OTP & Password Reset) ──────────────────────────────

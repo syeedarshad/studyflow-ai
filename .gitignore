@@ -1,3 +1,8 @@
+# Web landing page
+web/node_modules/
+web/dist/
+*.tsbuildinfo
+
 # Frontend
 frontend/node_modules/
 frontend/dist/
@@ -19,6 +24,8 @@ __pycache__/
 .env
 .env.*
 !.env.example
+backend/.env
+web/.env
 
 # Logs
 logs/
@@ -55,13 +62,6 @@ htmlcov/
 
 # Backend runtime data / user uploads / RAG vector storage
 backend/uploads/
-
-# Python caches
-*.pyc
-__pycache__/
-
-# Environment secrets
-backend/.env
 
 # Temporary files
 *.tmp
