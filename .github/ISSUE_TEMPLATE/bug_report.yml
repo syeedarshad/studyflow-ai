@@ -1,0 +1,136 @@
+name: Bug Report
+description: File a bug report to help us improve StudyFlow AI
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to report an issue! Please provide as much detail as possible to help us reproduce and resolve the problem quickly.
+
+        > [!IMPORTANT]
+        > **Security Vulnerabilities**: If you have discovered a security issue, please do **NOT** open a public issue. Review our [Security Policy](https://github.com/syeedarshad/studyflow-ai/blob/main/SECURITY.md) to report vulnerabilities privately.
+
+  - type: textarea
+    id: bug-description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+      placeholder: Describe the problem in detail...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Relevant Component
+      description: Select the part of StudyFlow AI where the issue occurs.
+      options:
+        - Desktop App
+        - Authentication
+        - Dashboard
+        - Tasks & Subtasks
+        - Focus Mode & Mini-Widget
+        - Planner & Scheduling
+        - Goals & Milestones
+        - Roadmaps
+        - Jass AI (Coach & Planning)
+        - Exam Prep
+        - Wellness Alerts
+        - Analytics & XP
+        - Notes
+        - Backend / FastAPI
+        - Database (SQLite / PostgreSQL)
+        - Marketing Website
+        - Installer & Setup
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: List the exact step-by-step actions required to reproduce the behavior.
+      placeholder: |
+        1. Open StudyFlow AI desktop app
+        2. Navigate to '...'
+        3. Click on '....'
+        4. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected Behavior
+      description: A clear and concise description of what you expected to happen.
+      placeholder: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual-behavior
+    attributes:
+      label: Actual Behavior
+      description: A clear and concise description of what actually happened.
+      placeholder: What went wrong or failed?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      description: What operating system are you using?
+      options:
+        - Windows 11 (64-bit)
+        - Windows 10 (64-bit)
+        - Linux
+        - macOS
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: StudyFlow AI Version
+      description: Which version of StudyFlow AI are you running?
+      placeholder: e.g., 1.0.0, or latest main branch commit hash
+    validations:
+      required: true
+
+  - type: dropdown
+    id: installation-method
+    attributes:
+      label: Installation Method
+      description: How did you install or run StudyFlow AI?
+      options:
+        - Windows Installer (.exe / NSIS)
+        - Windows Portable executable
+        - Source Code (npm start / install.bat)
+        - Docker Compose
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshots-logs
+    attributes:
+      label: Screenshots or Logs
+      description: Drag & drop screenshots, screen recordings, or paste relevant error logs / console output here.
+      placeholder: Paste console output, backend error logs, or drag and drop screenshots here...
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmation & Checklist
+      description: Please verify and confirm the following before submitting.
+      options:
+        - label: I have searched existing issues to ensure this bug has not already been reported.
+          required: true
+        - label: I have removed all sensitive information, including API keys, passwords, personal tokens, and private database data.
+          required: true

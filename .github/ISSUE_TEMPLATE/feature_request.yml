@@ -1,0 +1,81 @@
+name: Feature Request
+description: Suggest an idea or enhancement for StudyFlow AI
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting an idea to make StudyFlow AI better! Please provide details about the problem you are trying to solve and how you envision this feature working.
+
+  - type: textarea
+    id: problem-motivation
+    attributes:
+      label: Problem or Motivation
+      description: What problem are you trying to solve, or what need isn't currently addressed?
+      placeholder: A clear and concise description of the problem or limitation you are facing...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Relevant Component or Category
+      description: Select the area of StudyFlow AI this feature relates to.
+      options:
+        - Desktop App
+        - Authentication
+        - Dashboard
+        - Tasks & Subtasks
+        - Focus Mode & Mini-Widget
+        - Planner & Scheduling
+        - Goals & Milestones
+        - Roadmaps
+        - Jass AI (Coach & Planning)
+        - Exam Prep
+        - Wellness Alerts
+        - Analytics & XP
+        - Notes
+        - Backend / FastAPI
+        - Database (SQLite / PostgreSQL)
+        - Marketing Website
+        - Installer & Setup
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed Solution
+      description: Describe the solution or workflow you would like to see in StudyFlow AI.
+      placeholder: Describe the feature, user experience, UI changes, or functionality you propose...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives-considered
+    attributes:
+      label: Alternatives Considered
+      description: Describe any alternative solutions, workarounds, or features you've considered.
+      placeholder: What other approaches or workarounds have you tried or thought about?
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: Add any other context, mockups, screenshots, or references that could be helpful.
+      placeholder: Any additional details, mockups, or diagrams...
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmation
+      description: Please verify the following before submitting.
+      options:
+        - label: I have searched existing issues and feature requests to confirm this is not a duplicate.
+          required: true
