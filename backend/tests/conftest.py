@@ -90,8 +90,8 @@ async def setup_test_db():
         from app.api.tasks import models as _task_models  # noqa: F401
         from app.api.ai import models as _ai_models  # noqa: F401
         from app.api.onboarding import models as _onboarding_models  # noqa: F401
-        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_status VARCHAR(30) DEFAULT 'not_started' NOT NULL;"))
         await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_status VARCHAR(30) DEFAULT 'not_started' NOT NULL;"))
     yield
 
 
