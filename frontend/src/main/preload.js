@@ -69,7 +69,7 @@ contextBridge.exposeInMainWorld('studyflow', {
   titleGetInfo: () => ipcRenderer.invoke('title-get-info'),
 
   // ─── Daily Quests ────────────────────────────────────────────────────
-  questsGetToday: () => ipcRenderer.invoke('quests-get-today'),
+  questsGetToday: (options) => ipcRenderer.invoke('quests-get-today', options),
 
   // ─── AI Goal System ──────────────────────────────────────────────────
   goalsGetDashboard: ()              => ipcRenderer.invoke('goals-get-dashboard'),

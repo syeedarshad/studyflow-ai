@@ -376,6 +376,10 @@ async function showXPAwardNotification(amount, reason) {
     toast(`⚡ +${amount} XP — ${reason}`, 'success');
   }
   await updateSidebarXP();
+  if (App.currentPage === 'dashboard') {
+    const main = document.getElementById('main-content');
+    if (main) await renderDashboard(main);
+  }
 }
 
 // ─── Sidebar XP + Title Badge ─────────────────────────────────────────────────
@@ -798,31 +802,67 @@ function closeModal() {
 // ═══════════════════════════════════════════════════════════
 // PAGE: DASHBOARD
 // ═══════════════════════════════════════════════════════════
+function getXPLogIcon(reason, category) {
+  const r = (reason || '').toLowerCase();
+  const c = (category || '').toLowerCase();
+  if (r.includes('welcome') || c.includes('bonus')) return '🎉';
+  if (r.includes('quest') || c.includes('quest'))   return '🎯';
+  if (r.includes('task') || r.includes('completed')) return '✓';
+  if (r.includes('focus') || r.includes('session')) return '⏱';
+  if (r.includes('goal'))                           return '🏆';
+  return '⚡';
+}
+
+function renderTodayXPLogHtml(logs) {
+  if (!logs || logs.length === 0) {
+    return `<div style="font-size:12px;color:var(--text-3);padding:4px 0">No XP earned today yet. Complete tasks or focus sessions to earn XP!</div>`;
+  }
+  return logs.slice(0, 6).map(item => `
+    <div style="display:flex;justify-content:space-between;align-items:center;background:var(--surface-2);border-radius:var(--radius-sm);padding:6px 10px;font-size:12px">
+      <div style="display:flex;align-items:center;gap:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:75%">
+        <span>${getXPLogIcon(item.reason, item.category)}</span>
+        <span style="color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(item.reason || 'XP Award')}</span>
+      </div>
+      <span style="font-weight:700;color:var(--accent);white-space:nowrap">+${item.amount} XP</span>
+    </div>
+  `).join('');
+}
+
 async function renderDashboard(container) {
-  const [todayTasks, xpRes, streakRes, settingsRes, goalsRes, examsRes] = await Promise.all([
+  const [todayTasks, xpRes, totalXpRes, xpLogRes, streakRes, settingsRes, goalsRes, examsRes] = await Promise.all([
     window.TaskService ? window.TaskService.getTodayTasks() : window.studyflow.db('getTodayTasks').then(r => r.data || []),
     window.studyflow.db('getTodayXP'),
+    window.studyflow.db('getTotalXP'),
+    window.studyflow.db('getTodayXPLog', 10),
     window.studyflow.db('getStreak'),
     window.studyflow.db('getAllSettings'),
     window.studyflow.goalsGetDashboard().catch(() => ({ success: false })),
     window.studyflow.examGetAll().catch(() => ({ success: false }))
   ]);
 
-  const todayXP    = xpRes.data     || 0;
-  const streak     = streakRes.data || 0;
-  const settings   = settingsRes.data || {};
-  const goals      = (goalsRes.success && goalsRes.goals) ? goalsRes.goals.filter(g => g.status === 'active') : [];
-  const exams      = (examsRes.success && examsRes.exams) ? examsRes.exams.filter(x => x.status === 'active') : [];
+  const todayXP     = xpRes.data     || 0;
+  const totalXP     = totalXpRes.data || 0;
+  const todayXPLogs = xpLogRes.data  || [];
+  const streak      = streakRes.data || 0;
+  const settings    = settingsRes.data || {};
+  const goals       = (goalsRes.success && goalsRes.goals) ? goalsRes.goals.filter(g => g.status === 'active') : [];
+  const exams       = (examsRes.success && examsRes.exams) ? examsRes.exams.filter(x => x.status === 'active') : [];
 
-  const completed  = todayTasks.filter(t => t.status === 'completed');
-  const pending    = todayTasks.filter(t => t.status === 'pending');
-  const goalXP     = parseInt(settings.daily_xp_goal || 100);
-  const level      = Math.floor(Math.sqrt(todayXP / 50)) + 1;
-  const xpProgress = goalXP > 0 ? Math.min(100, (todayXP / goalXP) * 100) : 0;
-  const progress   = todayTasks.length > 0 ? Math.round((completed.length / todayTasks.length) * 100) : 0;
+  const completed   = todayTasks.filter(t => t.status === 'completed');
+  const pending     = todayTasks.filter(t => t.status === 'pending');
+  const progress    = todayTasks.length > 0 ? Math.round((completed.length / todayTasks.length) * 100) : 0;
+
+  // Level Progression
+  const level       = Math.floor(Math.sqrt(totalXP / 50)) + 1;
+  const xpForLevel  = (level - 1) * (level - 1) * 50;
+  const xpForNext   = level * level * 50;
+  const levelSpan   = xpForNext - xpForLevel;
+  const xpInLevel   = totalXP - xpForLevel;
+  const progressPct = levelSpan > 0 ? Math.min(100, Math.round((xpInLevel / levelSpan) * 100)) : 100;
+  const remainingXP = Math.max(0, xpForNext - totalXP);
 
   // Burnout: read from the DOM slot if banner already loaded, else 'none'
-  const burnoutRisk = 'none'; // populated after render by loadBurnoutBanner; greeting uses cached value on next render
+  const burnoutRisk = 'none';
 
   let careerGoal = null, dreamCompany = null;
   try {
@@ -905,14 +945,27 @@ async function renderDashboard(container) {
 
       <div style="display:flex;flex-direction:column;gap:16px">
         <div class="card">
-          <div class="card-title">⚡ XP Progress</div>
-          <div class="progress-label">
-            <span style="color:var(--accent)">⚡ ${todayXP} XP</span>
-            <span>Level ${level}</span>
+          <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+            <span>⚡ XP Progress</span>
+            <span style="font-size:12px;font-weight:700;color:var(--accent)">Level ${level}</span>
           </div>
-          <div class="progress-bar"><div class="progress-fill" style="width:${xpProgress}%"></div></div>
-          <div style="font-size:12px;color:var(--text-3);margin-top:8px">
-            ${goalXP - todayXP > 0 ? `${goalXP - todayXP} XP to daily goal` : '🎉 Daily goal reached!'}
+          <div class="progress-label" style="margin-top:6px;display:flex;justify-content:space-between;font-size:13px">
+            <span style="color:var(--text);font-weight:600">${totalXP} / ${xpForNext} XP</span>
+            <span style="font-size:12px;color:var(--text-3)">${progressPct}%</span>
+          </div>
+          <div class="progress-bar" style="height:6px;margin:8px 0"><div class="progress-fill" style="width:${progressPct}%"></div></div>
+          <div style="font-size:12px;color:var(--text-2);margin-bottom:14px">
+            <span style="color:var(--accent);font-weight:600">${remainingXP} XP</span> until Level ${level + 1}
+          </div>
+
+          <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:8px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+              <span style="font-size:12px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:0.5px">XP Earned Today</span>
+              <span style="font-size:12px;font-weight:700;color:var(--accent)">+${todayXP} XP</span>
+            </div>
+            <div id="today-xp-log-list" style="display:flex;flex-direction:column;gap:6px">
+              ${renderTodayXPLogHtml(todayXPLogs)}
+            </div>
           </div>
         </div>
 
@@ -1079,8 +1132,16 @@ async function loadDailyQuestsCard() {
   const slot = document.getElementById('daily-quests-slot');
   if (!slot) return;
   try {
-    const res = await window.studyflow.questsGetToday();
-    if (!res.success || !res.quests) { slot.innerHTML = ''; return; }
+    let completedTasksCount = 0;
+    try {
+      const todayTasks = window.TaskService
+        ? await window.TaskService.getTodayTasks()
+        : (await window.studyflow.db('getTodayTasks')).data || [];
+      completedTasksCount = (todayTasks || []).filter(t => t.status === 'completed').length;
+    } catch (e) { /* fallback */ }
+
+    const res = await window.studyflow.questsGetToday({ completedTasksCount });
+    if (!res.success || !res.quests || res.quests.length === 0) { slot.innerHTML = ''; return; }
     const { quests, completedCount, totalCount, earnedXP, totalXP, allCompleted, newlyCompleted } = res;
     if (newlyCompleted && newlyCompleted.length > 0) {
       for (const q of newlyCompleted) {
@@ -1089,9 +1150,9 @@ async function loadDailyQuestsCard() {
     }
     slot.innerHTML = `
       <div class="card ${allCompleted ? 'ai-shimmer' : ''}">
-        <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+        <div class="card-title" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
           <span>🎯 Daily Quests</span>
-          <span style="font-size:11px;color:var(--accent);font-weight:700">${completedCount}/${totalCount} · +${earnedXP}/${totalXP} XP</span>
+          <span style="font-size:12px;color:var(--accent);font-weight:700">${completedCount}/${totalCount} completed · ${earnedXP}/${totalXP} XP</span>
         </div>
         <div style="display:flex;flex-direction:column;gap:10px">
           ${quests.map((q,i) => renderQuestRow(q,i)).join('')}
@@ -1105,11 +1166,14 @@ async function loadDailyQuestsCard() {
 function renderQuestRow(quest, index) {
   const pct    = quest.target > 0 ? Math.min(100, Math.round((quest.progress / quest.target) * 100)) : 0;
   const isDone = quest.status === 'completed';
+  const unit   = quest.quest_key === 'focus_25_minutes' ? 'min' : '';
+  const progressText = unit ? `${quest.progress}/${quest.target} ${unit}` : `${quest.progress}/${quest.target}`;
+
   return `
     <div style="background:${isDone ? 'rgba(74,222,128,0.06)' : 'var(--surface-2)'};border:1px solid ${isDone ? 'var(--success)' : 'var(--border)'};border-radius:var(--radius-sm);padding:10px 14px;animation:planItemIn 0.4s ease backwards;animation-delay:${index*0.06}s">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
         <div style="display:flex;align-items:center;gap:8px">
-          <span style="font-size:14px">${isDone ? '✅' : '🔸'}</span>
+          <span style="font-size:14px">${isDone ? '✅' : '☐'}</span>
           <span style="font-size:13px;font-weight:600;color:var(--text)">${escapeHTML(quest.title)}</span>
         </div>
         <span style="font-size:11px;color:var(--accent);font-weight:700">+${quest.xp_reward} XP</span>
@@ -1118,7 +1182,7 @@ function renderQuestRow(quest, index) {
       <div class="progress-bar" style="height:4px">
         <div class="progress-fill" style="width:${pct}%;${isDone ? 'background:var(--success)' : ''}"></div>
       </div>
-      <div style="font-size:10px;color:var(--text-3);margin-top:4px;text-align:right">${quest.progress}/${quest.target}</div>
+      <div style="font-size:10px;color:var(--text-3);margin-top:4px;text-align:right">${isDone ? 'Completed' : progressText}</div>
     </div>
   `;
 }
@@ -1495,15 +1559,14 @@ async function toggleTask(id, currentStatus) {
         await showXPAwardNotification(res.xp_awarded, `Completed task: ${res.task?.title || 'Task'}`);
       } else {
         toast('Task marked as completed! ✅', 'success');
-        await updateSidebarXP();
       }
     } else {
       await window.studyflow.db('completeTask', id);
       toast('Task completed! 🎉', 'success');
       window.studyflow.notify('Task Complete!', 'Great work! Keep it up.');
-      await updateSidebarXP();
     }
     await updateSidebarXP();
+    await loadDailyQuestsCard();
     if (window.OnboardingCoach) window.OnboardingCoach.maybeEncourage();
   }
   if (App.currentPage === 'tasks')     await navigateTo('tasks');

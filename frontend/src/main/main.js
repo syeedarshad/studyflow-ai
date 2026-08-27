@@ -583,8 +583,8 @@ function setupIPC() {
     'completeTask', 'deleteNote', 'deleteTask', 'ensureWelcomeBonus', 'getAchievements',
     'getAllSettings', 'getCategoryStats', 'getMonthlyStats', 'getNotes',
     'getPendingPlan', 'getPlan', 'getStreak', 'getStreakHistory', 'getTasks',
-    'getTodaySessions', 'getTodayTasks', 'getTodayXP', 'getTotalXP',
-    'getWeeklyStats', 'getWellness', 'getXPTrend', 'savePlan', 'setSetting', 'updateNote',
+    'getTodaySessions', 'getTodayTasks', 'getTodayXP', 'getTodayXPLog', 'getTotalXP',
+    'getWeeklyStats', 'getWellness', 'getXPLog', 'getXPTrend', 'savePlan', 'setSetting', 'updateNote',
     'updateTask', 'updateWellness'
   ]);
 
@@ -950,15 +950,11 @@ function setupIPC() {
   // DAILY QUESTS
   // ═══════════════════════════════════════════════════════════════════════
 
-  ipcMain.handle('quests-get-today', () => {
+  ipcMain.handle('quests-get-today', (e, options) => {
     try {
-      const beforeIds = new Set(
-        db.db.prepare(`SELECT id FROM daily_quests WHERE date=date('now') AND status='completed'`).all().map(r => r.id)
-      );
+      const result = db.getDailyQuests(options);
 
-      const result = db.getDailyQuests();
-
-      const newlyCompleted = result.quests.filter(q => q.status === 'completed' && !beforeIds.has(q.id));
+      const newlyCompleted = result.newlyCompleted || [];
       newlyCompleted.forEach(q => {
         if (Notification.isSupported()) {
           new Notification({
