@@ -55,7 +55,7 @@ els.form.addEventListener('submit', async (e) => {
   hideError();
 
   const fullName = els.fullname.value.trim();
-  const email    = els.email.value.trim();
+  const email    = els.email.value.trim().toLowerCase();
   const password = els.password.value;
 
   if (mode === 'register' && !fullName) return showError('Please enter your full name.');

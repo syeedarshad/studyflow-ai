@@ -10,7 +10,6 @@
 #   docker-compose run --rm backend alembic upgrade head
 # ==============================================================================
 
-version: "3.9"
 
 services:
 
@@ -19,54 +18,71 @@ services:
     image: postgres:16-alpine
     container_name: studyflow_db
     restart: unless-stopped
+
     environment:
-      POSTGRES_USER:     ${POSTGRES_USER:-studyflow}
+      POSTGRES_USER: ${POSTGRES_USER:-studyflow}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_ME}
-      POSTGRES_DB:       ${POSTGRES_DB:-studyflow_ai}
+      POSTGRES_DB: ${POSTGRES_DB:-studyflow_ai}
+
     volumes:
       - postgres_data:/var/lib/postgresql/data
+
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-studyflow} -d ${POSTGRES_DB:-studyflow_ai}"]
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-studyflow} -d ${POSTGRES_DB:-studyflow_ai}" ]
       interval: 10s
       timeout: 5s
       retries: 5
-    ports:
-      - "5432:5432"   # Remove this in production (not needed externally)
 
   # ── FastAPI Backend ────────────────────────────────────────────────────────────
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
+
     container_name: studyflow_backend
     restart: unless-stopped
+
     depends_on:
       db:
         condition: service_healthy
+
     environment:
-      ENVIRONMENT:       ${ENVIRONMENT:-staging}
-      DEBUG:             ${DEBUG:-false}
-      ENABLE_API_DOCS:   ${ENABLE_API_DOCS:-}
-      DATABASE_URL:      postgresql+asyncpg://${POSTGRES_USER:-studyflow}:${POSTGRES_PASSWORD:-CHANGE_ME}@db:5432/${POSTGRES_DB:-studyflow_ai}
+      ENVIRONMENT: ${ENVIRONMENT:-staging}
+      DEBUG: ${DEBUG:-false}
+      ENABLE_API_DOCS: ${ENABLE_API_DOCS:-}
+
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-studyflow}:${POSTGRES_PASSWORD:-CHANGE_ME}@db:5432/${POSTGRES_DB:-studyflow_ai}
+
       DATABASE_SYNC_URL: postgresql+psycopg2://${POSTGRES_USER:-studyflow}:${POSTGRES_PASSWORD:-CHANGE_ME}@db:5432/${POSTGRES_DB:-studyflow_ai}
-      ENCRYPTION_KEY:    ${ENCRYPTION_KEY}
-      SESSION_SECRET:    ${SESSION_SECRET}
-      JWT_SECRET:        ${JWT_SECRET}
-      JWT_ALGORITHM:     ${JWT_ALGORITHM:-HS256}
-      GEMINI_API_KEY:    ${GEMINI_API_KEY:-}
-      GROQ_API_KEY:      ${GROQ_API_KEY:-}
+
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      SESSION_SECRET: ${SESSION_SECRET}
+      JWT_SECRET: ${JWT_SECRET}
+
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+
       AI_DAILY_REQUEST_LIMIT: ${AI_DAILY_REQUEST_LIMIT:-50}
-      UPLOAD_DIR:        /app/uploads
-      CORS_ORIGINS:      ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
-      ALLOWED_HOSTS:     ${ALLOWED_HOSTS:-127.0.0.1,localhost,testserver}
-      LOG_LEVEL:         ${LOG_LEVEL:-INFO}
+
+      UPLOAD_DIR: /app/uploads
+
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-127.0.0.1,localhost,testserver}
+
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
     volumes:
       # Persistent uploads volume — documents + per-user RAG vector stores
       - uploads_data:/app/uploads
+
     ports:
       - "8000:8000"
+
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:8000/health"]
+      test: [ "CMD", "curl", "-f", "http://127.0.0.1:8000/health" ]
       interval: 30s
       timeout: 5s
       start_period: 15s
@@ -76,5 +92,6 @@ services:
 volumes:
   postgres_data:
     driver: local
+
   uploads_data:
     driver: local
