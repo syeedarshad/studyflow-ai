@@ -14,6 +14,8 @@ export interface DownloadOption {
   title: string;
   description: string;
   meta: string;
+  badge?: string;
+  badgeType?: "accent" | "muted";
   fileType?: string;
   architecture?: string;
   recommended?: boolean;
@@ -27,34 +29,41 @@ export const downloads: DownloadOption[] = [
     id: "win-installer",
     platform: "windows",
     title: "Windows Installer",
-    description: "Recommended for most users",
-    meta: `v${APP_VERSION} · 64-bit · .exe`,
+    description: "Recommended for most users. Full desktop setup with automatic shortcuts.",
+    meta: `v${APP_VERSION} · 64-bit · .exe · ~95 MB`,
+    badge: "AVAILABLE NOW",
+    badgeType: "accent",
     fileType: ".exe",
     architecture: "64-bit",
     recommended: true,
     available: true,
-    buttonLabel: "Download",
-    url: (env.VITE_DOWNLOAD_WIN_INSTALLER as string) ?? `${GITHUB_URL}/releases/latest`,
+    buttonLabel: "Download for Windows",
+    url:
+      (env.VITE_DOWNLOAD_WIN_INSTALLER as string) ||
+      `${GITHUB_URL}/releases/latest/download/StudyFlow.AI.Setup.${APP_VERSION}.exe`,
   },
   {
     id: "win-portable",
     platform: "windows",
     title: "Windows Portable",
-    description: "Run without installation",
-    meta: `v${APP_VERSION} · 64-bit · .exe`,
+    description: "Standalone portable package without installation.",
+    meta: "Coming soon for v1.0.0",
+    badge: "COMING SOON",
+    badgeType: "muted",
     fileType: ".exe",
     architecture: "64-bit",
     recommended: false,
-    available: true,
-    buttonLabel: "Download",
-    url: (env.VITE_DOWNLOAD_WIN_PORTABLE as string) ?? `${GITHUB_URL}/releases/latest`,
+    available: false,
+    buttonLabel: "Coming Soon",
   },
   {
     id: "linux",
     platform: "linux",
     title: "Linux",
-    description: "Not available yet",
+    description: "AppImage and deb packages currently in development.",
     meta: "Coming soon",
+    badge: "COMING SOON",
+    badgeType: "muted",
     recommended: false,
     available: false,
     buttonLabel: "Coming Soon",

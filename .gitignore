@@ -63,6 +63,10 @@ htmlcov/
 # Backend runtime data / user uploads / RAG vector storage
 backend/uploads/
 
+# Binary artifacts and installers
+*.exe
+*.blockmap
+
 # Temporary files
 *.tmp
 *.temp

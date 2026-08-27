@@ -155,7 +155,7 @@ contextBridge.exposeInMainWorld('studyflow', {
   sessionClear: ()        => ipcRenderer.invoke('session-token-clear'),
 
   // ─── Backend Configuration ───────────────────────────────────────────
-  backendUrl: process.env.STUDYFLOW_BACKEND_URL || 'http://127.0.0.1:8000',
+  backendUrl: process.env.STUDYFLOW_BACKEND_URL || 'http://32.236.201.252:8000',
 
   // ─── Backend Health Check ─────────────────────────────────────────────
   // Returns true if the FastAPI backend is reachable.  Used by the
