@@ -1040,7 +1040,13 @@ class StudyFlowDB {
   getXPLog(limit = 20) {
     const uid = this.activeUserId;
     if (uid === null) return [];
-    return this.db.prepare('SELECT * FROM xp_log WHERE user_id = ? ORDER BY earned_at DESC LIMIT ?').all(uid, limit);
+    return this.db.prepare('SELECT * FROM xp_log WHERE user_id = ? ORDER BY earned_at DESC, id DESC LIMIT ?').all(uid, limit);
+  }
+
+  getTodayXPLog(limit = 10) {
+    const uid = this.activeUserId;
+    if (uid === null) return [];
+    return this.db.prepare(`SELECT * FROM xp_log WHERE date(earned_at)=date('now') AND user_id = ? ORDER BY earned_at DESC, id DESC LIMIT ?`).all(uid, limit);
   }
 
   getLevel(totalXP) {
@@ -2396,11 +2402,9 @@ class StudyFlowDB {
   // ═══════════════════════════════════════════════════════════════════════
 
   static QUEST_TEMPLATES = [
-    { key: 'complete_3_tasks',       title: 'Triple Threat',    description: 'Complete 3 tasks today',                    target: 3,  xp_reward: 25, metric: 'tasks_completed'       },
-    { key: 'focus_60_minutes',       title: 'Deep Work',        description: 'Accumulate 60 minutes of focus time today', target: 60, xp_reward: 30, metric: 'focus_minutes'         },
-    { key: 'complete_high_priority', title: 'Priority One',     description: 'Complete 1 high-priority task today',       target: 1,  xp_reward: 20, metric: 'high_priority_completed'},
-    { key: 'no_overdue',             title: 'Clean Slate',      description: 'End the day with zero overdue tasks',       target: 1,  xp_reward: 15, metric: 'no_overdue'            },
-    { key: 'wellness_check',         title: 'Balanced Day',     description: 'Log water intake and mark exercise done',   target: 1,  xp_reward: 15, metric: 'wellness_logged'       }
+    { key: 'complete_1_task',   title: 'Complete 1 task',                    description: 'Finish any 1 task today',                   target: 1,  xp_reward: 10, metric: 'tasks_completed' },
+    { key: 'complete_3_tasks',  title: 'Complete 3 tasks',                   description: 'Finish 3 tasks today',                      target: 3,  xp_reward: 20, metric: 'tasks_completed' },
+    { key: 'focus_25_minutes',  title: 'Complete a 25-minute focus session', description: 'Log at least 25 minutes of deep focus',   target: 25, xp_reward: 15, metric: 'focus_minutes'   }
   ];
 
   ensureDailyQuests() {
@@ -2410,35 +2414,45 @@ class StudyFlowDB {
     const existing = this.db.prepare('SELECT COUNT(*) as c FROM daily_quests WHERE date=? AND user_id=?').get(date, uid);
     if (existing.c > 0) return;
 
-    const dayOfYear = Math.floor((new Date() - new Date(new Date().getFullYear(),0,0)) / 86400000);
     const templates = StudyFlowDB.QUEST_TEMPLATES;
-    const count     = Math.min(3, templates.length);
     const insert    = this.db.prepare(`INSERT OR IGNORE INTO daily_quests (date,quest_key,title,description,target,xp_reward,status,user_id) VALUES (?,?,?,?,?,?,'active',?)`);
 
-    for (let i = 0; i < count; i++) {
-      const tpl = templates[(dayOfYear + i) % templates.length];
+    for (const tpl of templates) {
       insert.run(date, tpl.key, tpl.title, tpl.description, tpl.target, tpl.xp_reward, uid);
     }
   }
 
-  refreshDailyQuestProgress() {
+  refreshDailyQuestProgress(options = {}) {
     const uid = this.activeUserId;
     if (uid === null) return { quests: [], newlyCompleted: [] };
     this.ensureDailyQuests();
     const date       = today();
     const quests     = this.db.prepare('SELECT * FROM daily_quests WHERE date=? AND user_id=?').all(date, uid);
-    const todayTasks = this.getTodayTasks();
-    const completed  = todayTasks.filter(t => t.status === 'completed');
+    
+    // Count completed tasks from:
+    // 1. Explicit option passed in (e.g. from frontend TaskService)
+    // 2. Local SQLite tasks table
+    // 3. Today's task completion events in xp_log
+    const sqliteCompleted = this.getTodayTasks().filter(t => t.status === 'completed').length;
+    const xpLogCompleted = this.db.prepare(`
+      SELECT COUNT(*) as c FROM xp_log 
+      WHERE date(earned_at)=date('now') 
+        AND user_id = ? 
+        AND (reason LIKE 'Completed task%' OR reason LIKE 'Completed:%')
+    `).get(uid).c;
+    
+    const completedTasksCount = Math.max(
+      (typeof options?.completedTasksCount === 'number' ? options.completedTasksCount : 0),
+      sqliteCompleted,
+      xpLogCompleted
+    );
+
     const focusMins  = this.getTodayStudyMinutes();
-    const wellness   = this.getWellness() || {};
     const newlyCompleted = [];
 
     const metricValues = {
-      tasks_completed:        completed.length,
-      focus_minutes:          focusMins,
-      high_priority_completed: completed.filter(t => t.priority === 'high').length,
-      no_overdue:             (todayTasks.length > 0 && this.getOverdueTasks().length === 0) ? 1 : 0,
-      wellness_logged:        ((wellness.water_glasses > 0 ? 1 : 0) + (wellness.exercise_done ? 1 : 0)) >= 2 ? 1 : 0
+      tasks_completed: completedTasksCount,
+      focus_minutes:   focusMins,
     };
 
     const update = this.db.prepare(`UPDATE daily_quests SET progress=@progress,status=@status,completed_at=@completed_at WHERE id=@id AND user_id=@uid`);
@@ -2461,8 +2475,8 @@ class StudyFlowDB {
     return { quests: updatedQuests, newlyCompleted };
   }
 
-  getDailyQuests() {
-    const { quests, newlyCompleted } = this.refreshDailyQuestProgress();
+  getDailyQuests(options = {}) {
+    const { quests, newlyCompleted } = this.refreshDailyQuestProgress(options);
     const completedCount = quests.filter(q => q.status === 'completed').length;
     const totalXP       = quests.reduce((s,q) => s + q.xp_reward, 0);
     const earnedXP      = quests.filter(q => q.status === 'completed').reduce((s,q) => s + q.xp_reward, 0);

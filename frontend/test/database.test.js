@@ -362,19 +362,58 @@ console.log('\n== Multi-Account Data Isolation and Unowned Records Safety ==');
     assert.strictEqual(xpDb.getTotalXP(), initialXP + 20);
   });
 
-  check('getDailyQuests() does not silently award no_overdue quest when user has 0 tasks', () => {
+  check('getTodayXPLog() returns persistent today XP log events with reasons', () => {
+    const xpDb = new StudyFlowDB();
+    xpDb.setActiveUser(userA.id);
+    const logs = xpDb.getTodayXPLog(5);
+    assert.ok(Array.isArray(logs));
+    assert.ok(logs.length > 0);
+    assert.strictEqual(logs[0].user_id, userA.id);
+    assert.ok(logs[0].amount > 0);
+    assert.ok(logs[0].reason);
+  });
+
+  check('getDailyQuests() returns 3 achievable daily quests with proper initial state and targets', () => {
     const questDb = new StudyFlowDB();
     questDb.setActiveUser(userB.id);
-    const xpBefore = questDb.getTotalXP();
-
-    // User B has 0 tasks
     const questsRes = questDb.getDailyQuests();
     assert.ok(questsRes.quests);
-    const noOverdueQuest = questsRes.quests.find(q => q.quest_key === 'no_overdue');
-    if (noOverdueQuest) {
-      assert.strictEqual(noOverdueQuest.status, 'active', 'no_overdue quest must remain active when user has 0 tasks');
-    }
-    assert.strictEqual(questDb.getTotalXP(), xpBefore, 'No silent XP awarded on clean account with 0 tasks');
+    assert.strictEqual(questsRes.totalCount, 3);
+    assert.strictEqual(questsRes.totalXP, 45); // 10 + 20 + 15
+    assert.strictEqual(questsRes.completedCount, 0);
+    assert.strictEqual(questsRes.earnedXP, 0);
+
+    const keys = questsRes.quests.map(q => q.quest_key);
+    assert.ok(keys.includes('complete_1_task'));
+    assert.ok(keys.includes('complete_3_tasks'));
+    assert.ok(keys.includes('focus_25_minutes'));
+  });
+
+  check('completing a task advances "Complete 1 task" quest from 0/1 to 1/1, completes it, and awards XP once', () => {
+    const questDb = new StudyFlowDB();
+    questDb.setActiveUser(userB.id);
+    const initialXP = questDb.getTotalXP();
+
+    // 1. Task completed event logged in xp_log or passed in options
+    questDb.awardXP(10, 'Completed task: Solve Linear Algebra', 'Math');
+    assert.strictEqual(questDb.getTotalXP(), initialXP + 10);
+
+    // 2. Refresh quests with 1 completed task
+    const questsRes = questDb.getDailyQuests({ completedTasksCount: 1 });
+    const q1 = questsRes.quests.find(q => q.quest_key === 'complete_1_task');
+    assert.ok(q1);
+    assert.strictEqual(q1.progress, 1);
+    assert.strictEqual(q1.status, 'completed');
+    assert.strictEqual(questsRes.newlyCompleted.length, 1);
+    assert.strictEqual(questsRes.newlyCompleted[0].xp_reward, 10);
+
+    // Total XP should now be initialXP + 10 (task) + 10 (quest) = initialXP + 20
+    assert.strictEqual(questDb.getTotalXP(), initialXP + 20);
+
+    // 3. Repeated refresh must NOT award duplicate quest XP
+    const repeatRes = questDb.getDailyQuests({ completedTasksCount: 1 });
+    assert.strictEqual(repeatRes.newlyCompleted.length, 0);
+    assert.strictEqual(questDb.getTotalXP(), initialXP + 20);
   });
 
   electronMock.app.getPath = originalGetPath;
