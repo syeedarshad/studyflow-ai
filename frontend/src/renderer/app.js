@@ -279,6 +279,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   App.settings = (await window.studyflow.db('getAllSettings')).data || {};
   applyTheme(App.settings.theme || 'dark');
   await updateSidebarXP();
+
+  // Check for one-time Welcome Bonus for newly created accounts
+  try {
+    const bonusRes = await window.studyflow.db('ensureWelcomeBonus');
+    if (bonusRes?.success && bonusRes.data?.awarded) {
+      await showXPAwardNotification(bonusRes.data.amount, bonusRes.data.reason);
+    }
+  } catch (err) { /* non-critical */ }
+
   await navigateTo('dashboard');
   if (window.OnboardingCoach) window.OnboardingCoach.maybeStart();
 
@@ -354,6 +363,19 @@ async function navigateTo(page, section = null) {
       }, 50);
     }
   }
+}
+
+// ─── Unified XP Award Notification ───────────────────────────────────────────
+async function showXPAwardNotification(amount, reason) {
+  if (!amount || amount <= 0) return;
+  try {
+    const xpRes = await window.studyflow.db('getTotalXP');
+    const totalXP = xpRes?.data || 0;
+    toast(`⚡ +${amount} XP — ${reason} (Total: ${totalXP} XP)`, 'success');
+  } catch (err) {
+    toast(`⚡ +${amount} XP — ${reason}`, 'success');
+  }
+  await updateSidebarXP();
 }
 
 // ─── Sidebar XP + Title Badge ─────────────────────────────────────────────────
@@ -1059,7 +1081,12 @@ async function loadDailyQuestsCard() {
   try {
     const res = await window.studyflow.questsGetToday();
     if (!res.success || !res.quests) { slot.innerHTML = ''; return; }
-    const { quests, completedCount, totalCount, earnedXP, totalXP, allCompleted } = res;
+    const { quests, completedCount, totalCount, earnedXP, totalXP, allCompleted, newlyCompleted } = res;
+    if (newlyCompleted && newlyCompleted.length > 0) {
+      for (const q of newlyCompleted) {
+        await showXPAwardNotification(q.xp_reward, `Daily Quest: ${q.title}`);
+      }
+    }
     slot.innerHTML = `
       <div class="card ${allCompleted ? 'ai-shimmer' : ''}">
         <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
@@ -1462,15 +1489,19 @@ async function toggleTask(id, currentStatus) {
   } else {
     if (window.TaskService) {
       const res = await window.TaskService.completeTask(id);
-      toast('Task completed! XP awarded 🎉', 'success');
       window.studyflow.notify('Task Complete!', 'Great work! Keep it up.');
-      if (res.xp_awarded) {
-        await window.studyflow.db('awardXP', res.xp_awarded, 'Completed task', 'Revision').catch(() => {});
+      if (res && res.xp_awarded > 0) {
+        await window.studyflow.db('awardXP', res.xp_awarded, `Completed task: ${res.task?.title || 'Task'}`, res.task?.category || 'Revision').catch(() => {});
+        await showXPAwardNotification(res.xp_awarded, `Completed task: ${res.task?.title || 'Task'}`);
+      } else {
+        toast('Task marked as completed! ✅', 'success');
+        await updateSidebarXP();
       }
     } else {
       await window.studyflow.db('completeTask', id);
-      toast('Task completed! XP awarded 🎉', 'success');
+      toast('Task completed! 🎉', 'success');
       window.studyflow.notify('Task Complete!', 'Great work! Keep it up.');
+      await updateSidebarXP();
     }
     await updateSidebarXP();
     if (window.OnboardingCoach) window.OnboardingCoach.maybeEncourage();

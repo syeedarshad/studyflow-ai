@@ -346,6 +346,37 @@ console.log('\n== Multi-Account Data Isolation and Unowned Records Safety ==');
     assert.strictEqual(launchDb.getSetting('theme'), 'dark', 'NULL user receives in-memory default theme');
   });
 
+  check('ensureWelcomeBonus() awards +20 XP on first call and is strictly idempotent', () => {
+    const xpDb = new StudyFlowDB();
+    xpDb.setActiveUser(userA.id);
+    const initialXP = xpDb.getTotalXP();
+
+    const firstCall = xpDb.ensureWelcomeBonus();
+    assert.strictEqual(firstCall.awarded, true);
+    assert.strictEqual(firstCall.amount, 20);
+    assert.strictEqual(xpDb.getTotalXP(), initialXP + 20);
+
+    // Second call must be a no-op
+    const secondCall = xpDb.ensureWelcomeBonus();
+    assert.strictEqual(secondCall.awarded, false);
+    assert.strictEqual(xpDb.getTotalXP(), initialXP + 20);
+  });
+
+  check('getDailyQuests() does not silently award no_overdue quest when user has 0 tasks', () => {
+    const questDb = new StudyFlowDB();
+    questDb.setActiveUser(userB.id);
+    const xpBefore = questDb.getTotalXP();
+
+    // User B has 0 tasks
+    const questsRes = questDb.getDailyQuests();
+    assert.ok(questsRes.quests);
+    const noOverdueQuest = questsRes.quests.find(q => q.quest_key === 'no_overdue');
+    if (noOverdueQuest) {
+      assert.strictEqual(noOverdueQuest.status, 'active', 'no_overdue quest must remain active when user has 0 tasks');
+    }
+    assert.strictEqual(questDb.getTotalXP(), xpBefore, 'No silent XP awarded on clean account with 0 tasks');
+  });
+
   electronMock.app.getPath = originalGetPath;
 }
 

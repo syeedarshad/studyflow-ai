@@ -1014,6 +1014,17 @@ class StudyFlowDB {
     this.db.prepare('INSERT INTO xp_log (amount, reason, category, user_id) VALUES (?, ?, ?, ?)').run(amount, reason, category || 'General', uid);
   }
 
+  ensureWelcomeBonus() {
+    const uid = this.activeUserId;
+    if (uid === null) return { awarded: false };
+    const existing = this.db.prepare("SELECT 1 FROM xp_log WHERE user_id = ? AND reason = 'Welcome to StudyFlow AI'").get(uid);
+    if (!existing) {
+      this.awardXP(20, 'Welcome to StudyFlow AI', 'Bonus');
+      return { awarded: true, amount: 20, reason: 'Welcome to StudyFlow AI!' };
+    }
+    return { awarded: false };
+  }
+
   getTotalXP() {
     const uid = this.activeUserId;
     if (uid === null) return 0;
@@ -2412,7 +2423,7 @@ class StudyFlowDB {
 
   refreshDailyQuestProgress() {
     const uid = this.activeUserId;
-    if (uid === null) return [];
+    if (uid === null) return { quests: [], newlyCompleted: [] };
     this.ensureDailyQuests();
     const date       = today();
     const quests     = this.db.prepare('SELECT * FROM daily_quests WHERE date=? AND user_id=?').all(date, uid);
@@ -2420,12 +2431,13 @@ class StudyFlowDB {
     const completed  = todayTasks.filter(t => t.status === 'completed');
     const focusMins  = this.getTodayStudyMinutes();
     const wellness   = this.getWellness() || {};
+    const newlyCompleted = [];
 
     const metricValues = {
       tasks_completed:        completed.length,
       focus_minutes:          focusMins,
       high_priority_completed: completed.filter(t => t.priority === 'high').length,
-      no_overdue:             this.getOverdueTasks().length === 0 ? 1 : 0,
+      no_overdue:             (todayTasks.length > 0 && this.getOverdueTasks().length === 0) ? 1 : 0,
       wellness_logged:        ((wellness.water_glasses > 0 ? 1 : 0) + (wellness.exercise_done ? 1 : 0)) >= 2 ? 1 : 0
     };
 
@@ -2439,20 +2451,22 @@ class StudyFlowDB {
       if (wasActive && nowDone) {
         update.run({ id: q.id, progress, status: 'completed', completed_at: new Date().toISOString(), uid });
         this.awardXP(q.xp_reward, `Daily Quest: ${q.title}`, 'Quest');
+        newlyCompleted.push({ id: q.id, title: q.title, xp_reward: q.xp_reward });
       } else if (wasActive) {
         update.run({ id: q.id, progress, status: 'active', completed_at: null, uid });
       }
     });
 
-    return this.db.prepare('SELECT * FROM daily_quests WHERE date=? AND user_id=? ORDER BY id ASC').all(date, uid);
+    const updatedQuests = this.db.prepare('SELECT * FROM daily_quests WHERE date=? AND user_id=? ORDER BY id ASC').all(date, uid);
+    return { quests: updatedQuests, newlyCompleted };
   }
 
   getDailyQuests() {
-    const quests        = this.refreshDailyQuestProgress();
+    const { quests, newlyCompleted } = this.refreshDailyQuestProgress();
     const completedCount = quests.filter(q => q.status === 'completed').length;
     const totalXP       = quests.reduce((s,q) => s + q.xp_reward, 0);
     const earnedXP      = quests.filter(q => q.status === 'completed').reduce((s,q) => s + q.xp_reward, 0);
-    return { quests, completedCount, totalCount: quests.length, totalXP, earnedXP, allCompleted: quests.length > 0 && completedCount === quests.length };
+    return { quests, completedCount, totalCount: quests.length, totalXP, earnedXP, allCompleted: quests.length > 0 && completedCount === quests.length, newlyCompleted };
   }
 
   // ═══════════════════════════════════════════════════════════════════════

@@ -580,7 +580,7 @@ function setupIPC() {
   // now unreachable from this bridge regardless of what a caller sends.
   const ALLOWED_DB_METHODS = new Set([
     'addNote', 'addSession', 'addTask', 'awardXP', 'checkAchievements',
-    'completeTask', 'deleteNote', 'deleteTask', 'getAchievements',
+    'completeTask', 'deleteNote', 'deleteTask', 'ensureWelcomeBonus', 'getAchievements',
     'getAllSettings', 'getCategoryStats', 'getMonthlyStats', 'getNotes',
     'getPendingPlan', 'getPlan', 'getStreak', 'getStreakHistory', 'getTasks',
     'getTodaySessions', 'getTodayTasks', 'getTodayXP', 'getTotalXP',

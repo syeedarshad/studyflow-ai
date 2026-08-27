@@ -44,6 +44,7 @@
     "electron-store": "^8.1.0"
   },
   "devDependencies": {
+    "@electron/rebuild": "^4.2.0",
     "electron": "^38.5.0",
     "electron-builder": "^24.9.1",
     "playwright": "^1.61.1"

@@ -51,7 +51,8 @@ window.AuthService = {
    * @returns {{ success: boolean, user?: object, error?: string }}
    */
   async register(fullName, email, password) {
-    const res = await window.AuthAPI.register(fullName, email, password);
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+    const res = await window.AuthAPI.register(fullName, normalizedEmail, password);
     if (!res.success) {
       return { success: false, error: res.error || 'Registration failed.' };
     }
@@ -76,8 +77,9 @@ window.AuthService = {
    * @returns {{ success: boolean, user?: object, error?: string }}
    */
   async login(email, password) {
+    const normalizedEmail = String(email || '').trim().toLowerCase();
     const deviceLabel = `Windows / StudyFlow AI 2.0`;
-    const res = await window.AuthAPI.login(email, password, deviceLabel);
+    const res = await window.AuthAPI.login(normalizedEmail, password, deviceLabel);
     if (!res.success) {
       return { success: false, error: res.error || 'Invalid email or password.' };
     }
