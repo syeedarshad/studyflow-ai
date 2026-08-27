@@ -1,4 +1,4 @@
-import { Download } from "lucide-react";
+import { Download, Clock } from "lucide-react";
 import { downloads, RELEASE_NOTES_URL } from "../data/downloads";
 
 export default function DownloadSection() {
@@ -29,7 +29,15 @@ export default function DownloadSection() {
                   <div className="dl-card-header">
                     <div className="dl-card-title-row">
                       <h3 className="dl-card-title">{d.title}</h3>
-                      {isRecommended && <span className="dl-badge">RECOMMENDED</span>}
+                      {d.badge && (
+                        <span
+                          className={`dl-badge ${
+                            d.badgeType === "muted" ? "dl-badge-muted" : ""
+                          }`}
+                        >
+                          {d.badge}
+                        </span>
+                      )}
                     </div>
                     <p className="dl-card-desc">{d.description}</p>
                   </div>
@@ -54,7 +62,7 @@ export default function DownloadSection() {
                         disabled
                         aria-disabled="true"
                       >
-                        {d.buttonLabel}
+                        <Clock size={14} aria-hidden /> {d.buttonLabel}
                       </button>
                     )}
                   </div>

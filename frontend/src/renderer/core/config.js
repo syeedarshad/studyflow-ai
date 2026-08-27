@@ -15,9 +15,10 @@
     (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
   );
 
+  const defaultBackendUrl = isDev ? 'http://127.0.0.1:8000' : 'http://32.236.201.252:8000';
   const backendUrl = (
     (typeof window !== 'undefined' && (window.STUDYFLOW_BACKEND_URL || window.studyflow?.backendUrl)) ||
-    'http://127.0.0.1:8000'
+    defaultBackendUrl
   ).replace(/\/+$/, '');
   const apiBase = `${backendUrl}/api/v1`;
 

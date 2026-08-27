@@ -177,36 +177,49 @@ if (gotTheLock) {
 // WINDOW CREATION
 // ═══════════════════════════════════════════════════════════════════════
 
+// ─── Backend URL Resolver ───────────────────────────────────────────────────
+// Priority:
+// 1. Explicit environment variable STUDYFLOW_BACKEND_URL (development override / testing)
+// 2. Packaged production fallback (AWS EC2 backend: http://32.236.201.252:8000)
+// 3. Unpackaged local development default (http://127.0.0.1:8000)
+const DEFAULT_PRODUCTION_BACKEND_URL = 'http://32.236.201.252:8000';
+const DEFAULT_DEV_BACKEND_URL        = 'http://127.0.0.1:8000';
+
+function resolveBackendUrl() {
+  if (process.env.STUDYFLOW_BACKEND_URL) {
+    return process.env.STUDYFLOW_BACKEND_URL.replace(/\/+$/, '');
+  }
+  if (app && app.isPackaged) {
+    return DEFAULT_PRODUCTION_BACKEND_URL;
+  }
+  return DEFAULT_DEV_BACKEND_URL;
+}
+
 // ─── CSP Builder ──────────────────────────────────────────────────────────────
 // Called once per window creation. Derives the allowed backend origin from
-// STUDYFLOW_BACKEND_URL (set in the environment before Electron starts), then
-// injects a tight Content-Security-Policy via webRequest so neither index.html
-// nor login.html need to contain any hardcoded origin strings.
-//
-// Development  → STUDYFLOW_BACKEND_URL not set → defaults to http://127.0.0.1:8000
-// Production   → STUDYFLOW_BACKEND_URL=https://api.yourdomain.com
+// resolveBackendUrl(), then injects a tight Content-Security-Policy via webRequest
+// so neither index.html nor login.html need to contain any hardcoded origin strings.
 //
 // The resulting connect-src allows ONLY 'self' + the configured backend origin
 // (both http and the matching ws:// origin for WebSocket traffic).
 // No wildcard (*) is ever used.
 function _buildCsp(extraScriptSrc = '') {
-  const raw = (process.env.STUDYFLOW_BACKEND_URL || 'http://127.0.0.1:8000')
-    .replace(/\/+$/, '');               // strip trailing slashes
+  const raw = resolveBackendUrl();
 
   // Safely parse the backend origin.  If the URL is somehow malformed, fall
   // back to localhost so the app can still start rather than crashing.
-  let httpOrigin = 'http://127.0.0.1:8000';
+  let httpOrigin = DEFAULT_DEV_BACKEND_URL;
   let wsOrigin   = 'ws://127.0.0.1:8000';
   try {
     const parsed = new URL(raw);
-    httpOrigin = parsed.origin;                        // e.g. https://api.example.com
+    httpOrigin = parsed.origin;                        // e.g. http://32.236.201.252:8000
     wsOrigin   = httpOrigin.replace(/^https?:\/\//, 'ws://').replace(/^http:\/\//, 'ws://');
     // Preserve wss:// when the backend is https://
     if (parsed.protocol === 'https:') {
       wsOrigin = httpOrigin.replace(/^https:\/\//, 'wss://');
     }
   } catch {
-    logger.warn(`CSP: STUDYFLOW_BACKEND_URL "${raw}" is not a valid URL; falling back to localhost.`);
+    logger.warn(`CSP: STUDYFLOW_BACKEND_URL "${raw}" is not a valid URL; falling back to default.`);
   }
 
   // Build a tightly-scoped CSP.
@@ -513,8 +526,8 @@ function setupIPC() {
   ipcMain.handle('backend-ping', async () => {
     const http  = require('http');
     const https = require('https');
-    const backendBase = process.env.STUDYFLOW_BACKEND_URL || 'http://127.0.0.1:8000';
-    const healthUrl   = `${backendBase.replace(/\/+$/, '')}/health`;
+    const backendBase = resolveBackendUrl();
+    const healthUrl   = `${backendBase}/health`;
     const lib = healthUrl.startsWith('https') ? https : http;
     return new Promise((resolve) => {
       const req = lib.get(healthUrl, { timeout: 3000 }, (res) => {
