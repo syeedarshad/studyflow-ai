@@ -644,6 +644,52 @@ class StudyFlowDB {
     } catch (err) {
       logger.warn('[MIGRATION] settings cleanup failed (non-fatal):', err.message);
     }
+
+    // ── Productivity Scores: remove legacy UNIQUE(date) constraint & scope by user ──
+    try {
+      if (!this.isMigrationDone('productivity_scores_user_id_unique_v1')) {
+        const hasTable = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='productivity_scores'").get();
+        if (hasTable) {
+          const cols = this.db.prepare('PRAGMA table_info(productivity_scores)').all().map(c => c.name);
+          const hasDailyScore = cols.includes('daily_score');
+          const hasScore = cols.includes('score');
+          const dailyScoreCol = hasDailyScore ? 'daily_score' : (hasScore ? 'score AS daily_score' : '0 AS daily_score');
+          const weeklyScoreCol = cols.includes('weekly_score') ? 'weekly_score' : '0 AS weekly_score';
+          const focusScoreCol = cols.includes('focus_score') ? 'focus_score' : '0 AS focus_score';
+          const consistencyScoreCol = cols.includes('consistency_score') ? 'consistency_score' : '0 AS consistency_score';
+          const userIdCol = cols.includes('user_id') ? 'user_id' : 'NULL AS user_id';
+
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS productivity_scores_new (
+              id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id            INTEGER DEFAULT NULL,
+              date               TEXT NOT NULL DEFAULT (date('now')),
+              daily_score        INTEGER DEFAULT 0,
+              weekly_score       INTEGER DEFAULT 0,
+              focus_score        INTEGER DEFAULT 0,
+              consistency_score  INTEGER DEFAULT 0
+            );
+          `);
+
+          this.db.exec(`
+            INSERT OR IGNORE INTO productivity_scores_new (id, user_id, date, daily_score, weekly_score, focus_score, consistency_score)
+            SELECT id, ${userIdCol}, date, ${dailyScoreCol}, ${weeklyScoreCol}, ${focusScoreCol}, ${consistencyScoreCol}
+            FROM productivity_scores
+            WHERE id IN (
+              SELECT MAX(id) FROM productivity_scores GROUP BY date
+            );
+          `);
+
+          this.db.exec(`DROP TABLE productivity_scores;`);
+          this.db.exec(`ALTER TABLE productivity_scores_new RENAME TO productivity_scores;`);
+          this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_productivity_scores_user_date ON productivity_scores(user_id, date) WHERE user_id IS NOT NULL;`);
+          this.db.exec(`CREATE INDEX IF NOT EXISTS idx_productivity_scores_date ON productivity_scores(date);`);
+        }
+        this.markMigrationDone('productivity_scores_user_id_unique_v1');
+      }
+    } catch (err) {
+      logger.warn('[MIGRATION] productivity_scores migration failed (non-fatal):', err.message);
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -2121,17 +2167,34 @@ class StudyFlowDB {
     const streak          = this.getStreak();
     const consistencyScore = Math.min(100, Math.round((streak / 14) * 100));
 
-    const existing = this.db.prepare('SELECT 1 FROM productivity_scores WHERE date = date(\'now\') AND user_id = ?').get(uid);
-    if (existing) {
-      this.db.prepare(`
-        UPDATE productivity_scores SET daily_score=?, weekly_score=?, focus_score=?, consistency_score=?
-        WHERE date=date('now') AND user_id=?
-      `).run(dailyScore, weeklyScore, focusScore, consistencyScore, uid);
-    } else {
-      this.db.prepare(`
-        INSERT INTO productivity_scores (date, daily_score, weekly_score, focus_score, consistency_score, user_id)
-        VALUES (date('now'),?,?,?,?,?)
-      `).run(dailyScore, weeklyScore, focusScore, consistencyScore, uid);
+    try {
+      const existing = this.db.prepare(
+        "SELECT id FROM productivity_scores WHERE date = date('now') AND user_id = ?"
+      ).get(uid);
+
+      if (existing) {
+        this.db.prepare(`
+          UPDATE productivity_scores
+          SET daily_score = ?, weekly_score = ?, focus_score = ?, consistency_score = ?
+          WHERE id = ?
+        `).run(dailyScore, weeklyScore, focusScore, consistencyScore, existing.id);
+      } else {
+        this.db.prepare(`
+          INSERT INTO productivity_scores (date, daily_score, weekly_score, focus_score, consistency_score, user_id)
+          VALUES (date('now'), ?, ?, ?, ?, ?)
+        `).run(dailyScore, weeklyScore, focusScore, consistencyScore, uid);
+      }
+    } catch (err) {
+      logger.warn('[DB] computeProductivityScores upsert note:', err.message);
+      try {
+        this.db.prepare(`
+          UPDATE productivity_scores
+          SET daily_score = ?, weekly_score = ?, focus_score = ?, consistency_score = ?, user_id = ?
+          WHERE date = date('now') AND (user_id = ? OR user_id IS NULL)
+        `).run(dailyScore, weeklyScore, focusScore, consistencyScore, uid, uid);
+      } catch (innerErr) {
+        logger.warn('[DB] computeProductivityScores fallback update failed:', innerErr.message);
+      }
     }
 
     return {
@@ -2789,29 +2852,54 @@ class StudyFlowDB {
   }
 
   getCoachContext() {
-    const todayTasks  = this.getTodayTasks();
-    const overdue     = this.getOverdueTasks();
-    const goals       = this.getGoals({ status: 'active' }).slice(0, 3);
-    const scores      = this.computeProductivityScores();
-    const prefs       = this.getUserPreferences();
-    const aiContext   = this.getAIContextSummary();
+    try {
+      const todayTasks  = this.getTodayTasks();
+      const overdue     = this.getOverdueTasks();
+      const goals       = this.getGoals({ status: 'active' }).slice(0, 3);
+      let scores        = { dailyScore: 0, weeklyScore: 0, focusScore: 0, consistencyScore: 0 };
+      try {
+        scores = this.computeProductivityScores() || scores;
+      } catch (scoreErr) {
+        logger.warn('[DB] getCoachContext computeProductivityScores note:', scoreErr.message);
+      }
+      const prefs       = this.getUserPreferences();
+      const aiContext   = this.getAIContextSummary();
 
-    return {
-      today:                   today(),
-      todayTasksTotal:         todayTasks.length,
-      todayTasksCompleted:     todayTasks.filter(t => t.status==='completed').length,
-      overdueCount:            overdue.length,
-      activeGoals:             goals.map(g => ({ title:g.title, progress:g.progress_percentage, paceStatus:g.paceStatus, daysRemaining:g.daysRemaining })),
-      dailyScore:              scores.dailyScore,
-      weeklyScore:             scores.weeklyScore,
-      focusScore:              scores.focusScore,
-      consistencyScore:        scores.consistencyScore,
-      preferredStudyTime:      prefs?.preferred_study_time      || null,
-      mostProductiveCategory:  prefs?.most_productive_category  || null,
-      bestFocusHours:          aiContext.bestFocusHours,
-      productiveCategories:    aiContext.productiveCategories,
-      skippedCategories:       aiContext.skippedCategories
-    };
+      return {
+        today:                   today(),
+        todayTasksTotal:         todayTasks.length,
+        todayTasksCompleted:     todayTasks.filter(t => t.status==='completed').length,
+        overdueCount:            overdue.length,
+        activeGoals:             goals.map(g => ({ title:g.title, progress:g.progress_percentage, paceStatus:g.paceStatus, daysRemaining:g.daysRemaining })),
+        dailyScore:              scores.dailyScore ?? 0,
+        weeklyScore:             scores.weeklyScore ?? 0,
+        focusScore:              scores.focusScore ?? 0,
+        consistencyScore:        scores.consistencyScore ?? 0,
+        preferredStudyTime:      prefs?.preferred_study_time      || null,
+        mostProductiveCategory:  prefs?.most_productive_category  || null,
+        bestFocusHours:          aiContext.bestFocusHours || [],
+        productiveCategories:    aiContext.productiveCategories || [],
+        skippedCategories:       aiContext.skippedCategories || []
+      };
+    } catch (err) {
+      logger.warn('[DB] getCoachContext error (returning safe fallback):', err.message);
+      return {
+        today: today(),
+        todayTasksTotal: 0,
+        todayTasksCompleted: 0,
+        overdueCount: 0,
+        activeGoals: [],
+        dailyScore: 0,
+        weeklyScore: 0,
+        focusScore: 0,
+        consistencyScore: 0,
+        preferredStudyTime: null,
+        mostProductiveCategory: null,
+        bestFocusHours: [],
+        productiveCategories: [],
+        skippedCategories: []
+      };
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════

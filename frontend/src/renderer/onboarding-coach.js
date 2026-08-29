@@ -62,12 +62,19 @@ const OnboardingCoach = (() => {
 
   async function open() {
     state = freshState();
-    let name = 'there';
+    let name = '';
     try {
-      const settingsRes = await window.studyflow.db('getAllSettings');
-      name = settingsRes?.data?.user_name || 'there';
+      const activeUser = (typeof App !== 'undefined' && App.currentUser) || (window.SessionManager?.getUser?.());
+      if (activeUser?.full_name || activeUser?.name) {
+        name = (activeUser.full_name || activeUser.name).trim();
+      } else {
+        const settingsRes = await window.studyflow.db('getAllSettings');
+        if (settingsRes?.data?.user_name && settingsRes.data.user_name !== 'Student') {
+          name = settingsRes.data.user_name.trim();
+        }
+      }
     } catch (err) { /* fall back to generic greeting */ }
-    mount(name);
+    mount(name || 'Student');
   }
 
   /** Time-of-day greeting reusing the same IST logic already used by the
