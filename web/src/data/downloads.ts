@@ -6,7 +6,7 @@ export const GITHUB_URL: string =
 export const RELEASE_NOTES_URL: string =
   (env.VITE_RELEASE_NOTES_URL as string) ?? `${GITHUB_URL}/releases`;
 
-export const APP_VERSION: string = (env.VITE_APP_VERSION as string) ?? "1.0.0";
+export const APP_VERSION: string = (env.VITE_APP_VERSION as string) ?? "1.0.1";
 
 export interface DownloadOption {
   id: string;
@@ -47,7 +47,7 @@ export const downloads: DownloadOption[] = [
     platform: "windows",
     title: "Windows Portable",
     description: "Standalone portable package without installation.",
-    meta: "Coming soon for v1.0.0",
+    meta: "Coming soon for v1.0.1",
     badge: "COMING SOON",
     badgeType: "muted",
     fileType: ".exe",
