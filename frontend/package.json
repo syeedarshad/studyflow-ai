@@ -1,6 +1,6 @@
 {
   "name": "studyflow-ai",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "StudyFlow AI - Smart Productivity Dashboard for College Students",
   "main": "src/main/main.js",
   "scripts": {
