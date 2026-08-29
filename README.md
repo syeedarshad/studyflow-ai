@@ -27,6 +27,7 @@
     <a href="#getting-started">Getting Started</a> •
     <a href="#environment-configuration">Configuration</a> •
     <a href="#running-tests">Testing</a> •
+    <a href="#deployment-journey--challenges">Deployment Journey</a> •
     <a href="#contributing">Contributing</a> •
     <a href="#license">License</a>
   </p>
@@ -220,8 +221,8 @@ graph TD
 | **Desktop Client** | Electron 38, JavaScript (ES2022), HTML5, Vanilla CSS3 | Native desktop application with dark glassmorphism interface |
 | **Local Storage** | SQLite (`better-sqlite3`, `node:sqlite`), AES-GCM Encryption | Encrypted local database with user-isolated data and offline sync queue |
 | **Visualizations** | Chart.js 4.4 | Real-time analytics, streak tracking, and subject distribution charts |
-| **Marketing Website** | React 18, TypeScript, Vite, Framer Motion, Lucide Icons | Responsive product showcase and official installer downloads |
-| **Backend API** | FastAPI, Python 3.11+, Pydantic v2, Uvicorn | Asynchronous REST endpoints, WebSocket sessions, and AI orchestration |
+| **Marketing Website** | React 18, TypeScript, Vite, Framer Motion, Lucide Icons | Responsive product showcase and official installer downloads hosted on Vercel |
+| **Backend API** | FastAPI, Python 3.11+, Pydantic v2, Uvicorn | Asynchronous REST endpoints, WebSocket sessions, and AI orchestration on AWS EC2 |
 | **Cloud Database** | PostgreSQL, SQLAlchemy 2.0 (asyncpg / psycopg2), Alembic | Relational database schema with automated migration pipelines |
 | **AI & LLM Services** | Google Gemini, Groq, Personal RAG Vector Storage | Cloud intelligence pipeline with server-side credentials and local fallback |
 | **Packaging & CI** | Electron Builder, Pytest, Node Test Runner, GitHub Actions | Automated cross-suite CI verification and Windows installer packaging (.exe) |
@@ -343,7 +344,7 @@ docker compose logs -f backend
 ## Environment Configuration
 
 > **IMPORTANT SECURITY NOTE:**  
-> Never commit `.env` files, API keys, JWT secrets, database credentials, or private certificates to source control. All `.env` files are excluded in `.gitignore`.
+> Never commit `.env` files, API keys, JWT secrets, database credentials, or private certificates to source control. All `.env` files are excluded in `.gitignore`. Production AI provider credentials are stored strictly in the server-side environment on AWS EC2.
 
 ### Backend Configuration (`backend/.env`)
 
@@ -400,6 +401,326 @@ Verifies TypeScript compilation and production Vite bundling:
 cd web
 npm run build
 ```
+
+---
+
+## Deployment Journey & Challenges
+
+This section documents the actual end-to-end release process, real-world engineering challenges encountered, and operational verification steps followed for the StudyFlow AI production release.
+
+---
+
+### 1. Development → Feature Branch Workflow
+
+To maintain code quality and production stability, code is **never pushed directly to the `main` branch**. All features, bug fixes, and release preparations follow an isolated branch and pull request cycle:
+
+```
+main (stable production baseline)
+  │
+  ├──► Create feature/fix branch (e.g. fix/desktop-ai-and-coach)
+  │      │
+  │      ├── Local development & debugging
+  │      ├── Comprehensive local test execution (unit, database, integration)
+  │      ├── Git commit with descriptive messages
+  │      └── Push feature branch to origin
+  │
+  ├──► Open GitHub Pull Request into main (e.g. PR #5)
+  │      │
+  │      ├── Automated GitHub Actions CI pipeline execution
+  │      │     ├─ Backend (FastAPI & Pytest)
+  │      │     ├─ Desktop App (Electron & Unit Tests)
+  │      │     └─ Marketing Website (React & Vite Build)
+  │      ├── Code review & verification
+  │      └── Merge PR into main
+  │
+main updated & tagged for release
+```
+
+- The desktop AI and Coach Chat fixes were prepared on the dedicated branch `fix/desktop-ai-and-coach`.
+- All automated checks passed before Pull Request **#5** was merged into `main`.
+
+---
+
+### 2. Desktop AI & Backend Challenge
+
+During desktop integration, the application appeared to operate in an offline/local-AI mode, and daily AI request usage metrics were incrementing unexpectedly. 
+
+#### Investigation & Diagnosis:
+1. **Inspected AI Provider Pipeline**: Traced the IPC call sequence from `generateTaskPlanPreview()` in `app.js` $\rightarrow$ `ProviderManager.generateTasks()` $\rightarrow$ `POST /api/v1/ai/generate`.
+2. **Verified Gemini & Groq Backend Execution**: Verified that server-side provider credentials were properly configured in the backend environment.
+3. **Database Usage Audit**: Inspected the PostgreSQL `ai_usage_logs` table directly on the AWS backend, confirming that requests were successfully reaching the server:
+   - Queries were executing via `gemini-3.6-flash`.
+   - Rows recorded `provider: 'gemini'`, `model: 'gemini-3.6-flash'`, `success: true`, and token counts.
+   - Verified that earlier failures recorded `provider: 'offline'`, explaining the fallback badge.
+4. **Resolved Labeling Logic**: Clarified that `"Generated by Jass AI"` is the unified attribution label for cloud providers (Gemini & Groq), whereas `"Generated by Jass AI • Local mode"` indicates the local `OfflineEngine`.
+
+#### Final Resilient AI Architecture:
+
+```
+Jass AI (Unified Interface)
+  │
+  ├──► 1. Google Gemini (gemini-3.6-flash) — Primary Cloud LLM
+  │
+  ├──► 2. Groq (llama-3.3-70b-versatile) — High-Throughput Fallback
+  │
+  └──► 3. OfflineEngine — Deterministic Local Rule-Based Engine (when offline/unreachable)
+```
+
+Daily quota usage tracking is enforced server-side via `ai_usage_logs` and queryable through `/api/v1/usage`.
+
+---
+
+### 3. GitHub Pull Request & CI Validation
+
+Before merging PR #5 and subsequent releases, the entire test suite was executed locally and verified through GitHub Actions.
+
+#### Frontend Test Suite (95/95 Tests Passing):
+- **Database & Multi-Account Isolation**: 27 passed (verifying table migrations, user isolation, idempotent quest counters).
+- **User Authentication & Session**: 19 passed (verifying bcrypt hashing, AES secure storage, non-expiring sessions).
+- **Theme & Settings Persistence**: 17 passed (verifying settings persistence without duplicate rows).
+- **Settings & AI Services**: 5 passed (verifying credential privacy and settings UI).
+- **SyncManager Multi-Account Isolation**: 7 passed (verifying user-scoped offline queue management and race-condition guards).
+- **AI Provider Pipeline & Formatting**: 20 passed (verifying schedule normalization, provider attribution formatting, and review notices).
+
+#### GitHub Actions CI Matrix:
+- **Backend**: Python 3.11, PostgreSQL service container, Pytest suite.
+- **Desktop App**: Node.js 22, Electron test runner.
+- **Marketing Website**: Node.js 22, TypeScript compiler (`tsc -b`) and Vite production bundler.
+
+PR **#5** (Desktop AI and Coach fixes) was merged first, followed by PR **#6** (Web release and documentation).
+
+---
+
+### 4. AWS EC2 Backend Deployment
+
+The production FastAPI backend and PostgreSQL database run containerized on AWS EC2. The verified deployment procedure:
+
+1. **SSH Connection**: Connect securely to the EC2 instance using SSH key pairs.
+2. **Repository Verification**: Verify the working directory (`/home/ubuntu/studyflow-ai`) and active branch (`main`).
+3. **Pull Latest Release**: Fetch and pull the latest changes from `origin/main`.
+4. **Preserve Server Environment**: Ensure the production `.env` file remains intact on the host with all server-side secrets.
+5. **Container Rebuild**: Rebuild and restart the container services cleanly:
+   ```bash
+   docker compose up -d --build
+   ```
+6. **Container Status Check**: Confirm containers (`studyflow_backend` and `studyflow_db`) report healthy.
+7. **Backend Health Check**:
+   ```bash
+   curl http://<EC2_PUBLIC_IP>:8000/health
+   ```
+   **Output:**
+   ```json
+   {"status":"ok","version":"2.0.0","uptime":79.22}
+   ```
+8. **Safe Environment Audit**: Verify that `GEMINI_API_KEY` and `GROQ_API_KEY` are non-empty and accessible *inside* the container without printing secrets:
+   ```bash
+   docker compose exec backend python -c "import os; print('GEMINI:', 'SET' if os.getenv('GEMINI_API_KEY') else 'EMPTY'); print('GROQ:', 'SET' if os.getenv('GROQ_API_KEY') else 'EMPTY')"
+   ```
+   **Output:**
+   ```text
+   GEMINI: SET
+   GROQ: SET
+   ```
+9. **Live Endpoint Test**: Test authenticated requests to `/api/v1/ai/generate`.
+10. **Database Usage Audit**: Query `ai_usage_logs` in PostgreSQL to confirm server-side logging of tokens, model version, and timestamps.
+
+---
+
+### 5. AWS Git & Docker Compose Conflict Resolution
+
+During deployment, a divergence occurred on the EC2 host:
+- `docker-compose.yml` on the server contained local modifications tailored to the staging environment.
+- Several accidental empty untracked files with comma-suffixed names existed in the workspace.
+
+#### Resolution Procedure:
+1. Ran `git status` and `git diff` to inspect untracked files and local changes.
+2. Removed extraneous untracked files safely.
+3. Stashed the local `docker-compose.yml` modifications (`git stash`).
+4. Pulled latest `origin/main`.
+5. Restored necessary host-specific compose directives (`env_file: - .env`) and verified YAML integrity.
+6. Re-verified that `/home/ubuntu/studyflow-ai/.env` was untouched with `600` permissions.
+7. Recreated containers with `docker compose up -d --force-recreate backend`.
+
+> **Why the AWS `.env` Must Remain Outside Git:**  
+> The `.env` file contains sensitive live production credentials (`DATABASE_URL`, `JWT_SECRET`, `SESSION_SECRET`, `ENCRYPTION_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`). Committing this file to Git exposes credentials in repository history and creates deployment conflicts across environments.
+
+---
+
+### 6. API Key Security & Privacy Standards
+
+StudyFlow AI adheres to strict zero-trust credential isolation:
+
+- **Server-Side Only**: Cloud AI provider keys (Gemini & Groq) are stored **only** in the AWS EC2 `.env` file and read by the FastAPI backend service.
+- **Client Blindness**: The desktop Electron client and the marketing web application **never** receive, store, or prompt users for AI API keys.
+- **Sanitized Responses**: Backend error handlers sanitize upstream messages to ensure no API key fragments or tokens leak in response payloads or logs.
+
+#### Strict Security Rules:
+- ❌ **NEVER** commit `.env` files to Git.
+- ❌ **NEVER** include API keys or secrets in `README.md` or documentation.
+- ❌ **NEVER** hardcode provider credentials in frontend, Electron, or web source code.
+- ❌ **NEVER** print secret values in terminal output, CI logs, or application logs.
+- ❌ **NEVER** expose backend signing keys or database passwords to client bundles.
+
+---
+
+### 7. Production Vercel Web Deployment
+
+The official StudyFlow AI web showcase is hosted on **Vercel**:
+
+- **Location**: `web/` directory.
+- **Stack**: React 18, TypeScript, Vite, Framer Motion, Lucide Icons.
+- **Build Command**: `npm run build` (`tsc -b && vite build`).
+- **Output Directory**: `web/dist`.
+- **Deployment Trigger**: Vercel Git Integration monitors the `main` branch.
+- **Deployment Execution**: When PR #6 was merged into `main`, Vercel automatically compiled and deployed commit `dc25cae`.
+- **Status**: `Ready` (Production environment, live).
+
+> **Note on CI vs. Deployment:**  
+> GitHub Actions validates that the code builds and passes tests on every pull request. Vercel performs the actual production hosting and worldwide CDN distribution of the web application.
+
+---
+
+### 8. Web Deployment Architecture
+
+The separation of concerns between testing, web hosting, and API infrastructure:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    GitHub Repository                        │
+│                     (Branch: main)                          │
+└──────────────┬──────────────────────────────┬───────────────┘
+               │                              │
+               ▼ (CI Check on PR/Push)        ▼ (Auto-Deploy on Merge)
+┌──────────────────────────────┐ ┌───────────────────────────┐
+│        GitHub Actions        │ │          Vercel           │
+│  - FastAPI Pytest (Python)   │ │  - React 18 / Vite Build  │
+│  - Electron Unit Tests       │ │  - Global Edge CDN Host   │
+│  - TypeScript & Vite Build   │ │  - Marketing & Downloads  │
+└──────────────────────────────┘ └───────────────────────────┘
+                                              ▲
+                                              │
+               ┌──────────────────────────────┴───────────────┐
+               │                                              │
+               ▼ (App Downloads)                              ▼ (API Requests)
+┌──────────────────────────────┐ ┌───────────────────────────┐
+│     Windows Desktop App      │ │      AWS EC2 Server       │
+│  - Local SQLite Database     │ │  - FastAPI Backend (8000) │
+│  - Offline Heuristic Engine  │─┼─►- PostgreSQL Database    │
+│  - Pomodoro & Timeblocking   │ │  - Gemini / Groq Proxy    │
+└──────────────────────────────┘ └───────────────────────────┘
+```
+
+---
+
+### 9. End-to-End Production Verification
+
+The following end-to-end production verification flow was performed successfully during deployment:
+
+```
+1. User visits Vercel Production Website
+   │
+2. Downloads latest StudyFlow AI Desktop Installer (.exe)
+   │
+3. Runs Electron Desktop Application
+   │
+4. Logs in / authenticates with AWS EC2 FastAPI Backend
+   │
+5. Triggers "Generate Tasks" / "AI Coach Chat"
+   │
+6. Backend verifies quota & dispatches to Google Gemini
+   │
+7. Receives structured plan response in desktop UI
+   │
+8. Query PostgreSQL `ai_usage_logs` on EC2:
+   ┌──────────┬──────────────────┬─────────┬─────────────┬───────────────────────────────┐
+   │ provider │ model            │ success │ tokens_used │ requested_at                  │
+   ├──────────┼──────────────────┼─────────┼─────────────┼───────────────────────────────┤
+   │ gemini   │ gemini-3.6-flash │ true    │ 1969        │ 2026-08-28 19:42:31.987250+00 │
+   │ gemini   │ gemini-3.6-flash │ true    │ 1071        │ 2026-08-28 19:41:34.572818+00 │
+   │ gemini   │ gemini-3.6-flash │ true    │ 779         │ 2026-08-28 19:41:13.671144+00 │
+   │ gemini   │ gemini-3.6-flash │ true    │ 1266        │ 2026-08-28 19:40:23.703865+00 │
+   └──────────┴──────────────────┴─────────┴─────────────┴───────────────────────────────┘
+```
+
+---
+
+### 10. Lessons Learned
+
+1. **Protect Main Branch**: Never push unreviewed code directly to `main`. Always utilize feature branches and pull requests.
+2. **Pre-Push Validation**: Run local unit and database test suites before opening PRs to catch regressions early.
+3. **Respect Host Configurations**: AWS production environments often have server-specific Docker Compose configs that must be reconciled carefully during git pulls.
+4. **Never Commit `.env`**: Store secrets strictly in host environment files with restricted permissions (`chmod 600`).
+5. **Verify Without Exposing**: Check variable presence using boolean checks (`SET`/`EMPTY` or length) rather than printing plaintext values.
+6. **Container Health Isolation**: Check `/health` endpoint status before testing higher-level authenticated features.
+7. **Verify AI via Database Logs**: Do not rely solely on frontend badges; verify actual backend execution and token logs in PostgreSQL.
+8. **CI Validation $\neq$ Deployment**: A passing GitHub Actions run confirms code integrity, but production deployments (Vercel/EC2) must be independently monitored.
+9. **Test Real Production Artifacts**: Always download and test the packaged Windows installer from GitHub Releases rather than relying solely on local development mode.
+
+---
+
+### 11. Current Production Architecture
+
+```
+                                  User
+                                   │
+         ┌─────────────────────────┴─────────────────────────┐
+         │                                                   │
+         ▼                                                   ▼
+┌──────────────────┐                               ┌──────────────────┐
+│      Vercel      │                               │ Windows Desktop  │
+│  (React 18/Vite) │                               │  (Electron 38)   │
+│  Marketing Web   │                               │  Local SQLite    │
+└──────────────────┘                               └────────┬─────────┘
+                                                            │
+                                                            ▼ (HTTP / WebSocket)
+                                                   ┌──────────────────┐
+                                                   │   AWS EC2 Host   │
+                                                   │ ┌──────────────┐ │
+                                                   │ │FastAPI (8000)│ │
+                                                   │ └──────┬───────┘ │
+                                                   │        │         │
+                                                   │ ┌──────▼───────┐ │
+                                                   │ │  PostgreSQL  │ │
+                                                   │ └──────────────┘ │
+                                                   │        │         │
+                                                   │ ┌──────▼───────┐ │
+                                                   │ │ Gemini / Groq│ │
+                                                   │ └──────────────┘ │
+                                                   └──────────────────┘
+```
+
+- **Vercel**: Hosts the static marketing web application and product showcase.
+- **AWS EC2**: Hosts the containerized FastAPI backend and PostgreSQL database.
+- **PostgreSQL**: Stores relational user accounts, tasks, schedules, roadmaps, and `ai_usage_logs`.
+- **Gemini / Groq**: Server-managed LLM providers invoked securely via backend proxy.
+- **OfflineEngine**: Embedded client-side rule engine providing offline resilience when disconnected.
+
+---
+
+### 12. Production Release Checklist
+
+Use this reusable checklist for all future releases:
+
+- [ ] Create and checkout a feature branch (`git checkout -b feature/<name>` or `fix/<name>`)
+- [ ] Implement changes and maintain backward compatibility
+- [ ] Run frontend test suite (`cd frontend && npm test` $\rightarrow$ 95/95 passing)
+- [ ] Run backend test suite (`cd backend && pytest`)
+- [ ] Verify web build (`cd web && npm run build`)
+- [ ] Commit changes with clear, descriptive commit messages
+- [ ] Push feature branch to origin (`git push -u origin <branch>`)
+- [ ] Open Pull Request into `main`
+- [ ] Confirm all GitHub Actions CI checks pass
+- [ ] Review and merge Pull Request into `main`
+- [ ] SSH into AWS EC2 production instance
+- [ ] Verify repository state and pull latest `main`
+- [ ] Confirm production `.env` is preserved with valid secrets
+- [ ] Rebuild and restart containers (`docker compose up -d --build`)
+- [ ] Verify container health (`GET /health`)
+- [ ] Verify AI provider keys are `SET` inside the backend container
+- [ ] Test authenticated AI endpoint (`/api/v1/ai/generate`)
+- [ ] Query PostgreSQL `ai_usage_logs` to confirm request tracking
+- [ ] Verify Vercel deployment status (`Ready` on latest commit)
+- [ ] Download latest Windows desktop release build and verify end-to-end functionality
 
 ---
 
