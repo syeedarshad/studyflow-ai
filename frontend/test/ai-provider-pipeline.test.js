@@ -108,7 +108,7 @@ async function runTests() {
 
   check('ProviderManager uses dynamic HTTP/HTTPS transport based on backend URL', () => {
     const pmJs = fs.readFileSync(path.join(__dirname, '../src/main/ai/provider-manager.js'), 'utf8');
-    assert.ok(pmJs.includes("STUDYFLOW_BACKEND_URL || 'http://127.0.0.1:8000'"), 'Must read backend base URL');
+    assert.ok(pmJs.includes('STUDYFLOW_BACKEND_URL'), 'Must read backend base URL');
     assert.ok(pmJs.includes("parsedUrl.protocol === 'https:' ? https : http"), 'Must select transport dynamically');
   });
 

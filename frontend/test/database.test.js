@@ -416,6 +416,51 @@ console.log('\n== Multi-Account Data Isolation and Unowned Records Safety ==');
     assert.strictEqual(questDb.getTotalXP(), initialXP + 20);
   });
 
+  check('computeProductivityScores() called multiple times on the same date is idempotent without UNIQUE constraint errors', () => {
+    const scoreDb = new StudyFlowDB();
+    scoreDb.setActiveUser(userA.id);
+
+    // Call 1
+    const res1 = scoreDb.computeProductivityScores();
+    assert.ok(res1);
+    assert.strictEqual(typeof res1.dailyScore, 'number');
+
+    // Call 2 (same date, same user)
+    const res2 = scoreDb.computeProductivityScores();
+    assert.ok(res2);
+    assert.strictEqual(res2.dailyScore, res1.dailyScore);
+
+    // Switch to User B and call
+    scoreDb.setActiveUser(userB.id);
+    const resB1 = scoreDb.computeProductivityScores();
+    assert.ok(resB1);
+
+    const resB2 = scoreDb.computeProductivityScores();
+    assert.ok(resB2);
+  });
+
+  check('getCoachContext() can be called safely and repeatedly on the same day without throwing', () => {
+    const coachDb = new StudyFlowDB();
+    coachDb.setActiveUser(userA.id);
+
+    // 1st invocation
+    const ctx1 = coachDb.getCoachContext();
+    assert.ok(ctx1);
+    assert.strictEqual(typeof ctx1.dailyScore, 'number');
+
+    // 2nd invocation
+    const ctx2 = coachDb.getCoachContext();
+    assert.ok(ctx2);
+
+    // 3rd invocation with message saves simulating multiple Coach Chat turns
+    coachDb.saveCoachMessage('user', 'I missed my tasks');
+    coachDb.saveCoachMessage('assistant', 'Progress is progress, pick one task.');
+    coachDb.saveCoachMessage('user', 'Hello, introduce yourself.');
+    const ctx3 = coachDb.getCoachContext();
+    assert.ok(ctx3);
+    assert.strictEqual(coachDb.getCoachHistory().length, 3);
+  });
+
   electronMock.app.getPath = originalGetPath;
 }
 

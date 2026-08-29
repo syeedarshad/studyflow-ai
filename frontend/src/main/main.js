@@ -1537,9 +1537,14 @@ function setupIPC() {
       const history      = db.getCoachHistory(10);
       const coachContext = db.getCoachContext();
       const result       = await aiProvider.chatWithCoach(userMessage, history, coachContext);
-      db.saveCoachMessage('assistant', result.reply);
-      return { success: true, reply: result.reply, provider: result.provider };
+      const replyText    = (result && typeof result.reply === 'string' && result.reply.trim())
+        ? result.reply.trim()
+        : 'Keep up the momentum! Pick your next highest-priority task to make steady progress.';
+      const provider     = (result && result.provider) || 'offline';
+      db.saveCoachMessage('assistant', replyText);
+      return { success: true, reply: replyText, provider };
     } catch (err) {
+      logger.ipcError('coach-chat-send', err);
       return { success: false, error: err.message };
     }
   });

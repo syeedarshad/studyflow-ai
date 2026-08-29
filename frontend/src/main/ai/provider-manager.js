@@ -17,6 +17,8 @@
 
 'use strict';
 
+const http          = require('http');
+const https         = require('https');
 const { callGemini } = require('./gemini-driver');
 const { callGroq }   = require('./groq-driver');
 const OfflineEngine  = require('./offline-engine');
@@ -389,29 +391,33 @@ class ProviderManager {
    * If the backend is unreachable (app is offline), throws so the caller
    * can invoke OfflineEngine as before.
    *
-   * @param {string} prompt  - fully-built prompt string
-   * @param {string} [feature] - optional feature label for usage tracking
+   * @param {string} prompt      - fully-built prompt string
+   * @param {string} [feature]   - optional feature label for usage tracking
+   * @param {boolean} [expectJson=true] - whether the response should be structured JSON
    * @returns {{ text: string, provider: string }}
    */
-  async callWithFallback(prompt, feature) {
+  async callWithFallback(prompt, feature = null, expectJson = true) {
     const token = this._getBackendSessionToken();
+
+    const hasToken = Boolean(token);
+    const backendBase = process.env.STUDYFLOW_BACKEND_URL
+      ? process.env.STUDYFLOW_BACKEND_URL.replace(/\/+$/, '')
+      : 'http://32.236.201.252:8000';
+    const parsedUrl = new URL('/api/v1/ai/generate', backendBase);
+    const transport = parsedUrl.protocol === 'https:' ? https : http;
+
+    logger.info(`[AI] Dispatch feature=${feature || 'general'} backend=${parsedUrl.origin} has_token=${hasToken}${token ? ` token_len=${token.length}` : ''}`);
 
     if (!token) {
       // No backend session — fall through to OfflineEngine
-      logger.warn('[provider-manager] No backend session token — falling back to offline engine.');
+      logger.warn(`[AI] No backend session token available — falling back to offline engine for ${feature || 'general'}`);
       throw new Error('No backend session available');
     }
-
-    const http = require('http');
-    const https = require('https');
-    const backendBase = process.env.STUDYFLOW_BACKEND_URL || 'http://127.0.0.1:8000';
-    const parsedUrl = new URL('/api/v1/ai/generate', backendBase);
-    const transport = parsedUrl.protocol === 'https:' ? https : http;
 
     const bodyStr = JSON.stringify({
       prompt,
       feature:     feature || null,
-      expect_json: true,
+      expect_json: Boolean(expectJson),
     });
 
     const responseText = await new Promise((resolve, reject) => {
@@ -433,20 +439,30 @@ class ProviderManager {
         res.on('data', chunk => (data += chunk));
         res.on('end', () => {
           if (res.statusCode === 429) {
+            logger.warn(`[AI] Backend request failed status=429 reason=QUOTA_EXCEEDED`);
             return reject(new Error('QUOTA_EXCEEDED'));
           }
           if (res.statusCode === 401) {
+            logger.warn(`[AI] Backend request failed status=401 reason=SESSION_INVALID`);
             return reject(new Error('SESSION_INVALID'));
           }
           if (res.statusCode < 200 || res.statusCode >= 300) {
+            const preview = data ? data.slice(0, 200) : 'empty response';
+            logger.warn(`[AI] Backend request failed status=${res.statusCode} reason=${preview}`);
             return reject(new Error(`Backend returned HTTP ${res.statusCode}`));
           }
           resolve(data);
         });
       });
 
-      req.on('error', (err) => reject(new Error(`Backend unreachable: ${err.code || err.message}`)));
-      req.on('timeout', () => req.destroy(new Error('Backend request timed out')));
+      req.on('error', (err) => {
+        logger.warn(`[AI] Backend transport error (${parsedUrl.origin}): ${err.code || err.message}`);
+        reject(new Error(`Backend unreachable: ${err.code || err.message}`));
+      });
+      req.on('timeout', () => {
+        logger.warn(`[AI] Backend request timed out after 60s (${parsedUrl.origin})`);
+        req.destroy(new Error('Backend request timed out'));
+      });
       req.write(bodyStr);
       req.end();
     });
@@ -455,15 +471,17 @@ class ProviderManager {
     try {
       parsed = JSON.parse(responseText);
     } catch {
+      logger.warn('[AI] Backend returned non-JSON response payload');
       throw new Error('Backend returned non-JSON response');
     }
 
     if (!parsed.success) {
-      // Backend failed (both providers down) — fall back to OfflineEngine
       const safeErr = parsed.error || 'AI service temporarily unavailable';
-      logger.warn(`[provider-manager] Backend AI failed: ${safeErr}`);
+      logger.warn(`[AI] Backend AI generation failed: ${safeErr} (provider=${parsed.provider || 'none'})`);
       throw new Error(safeErr);
     }
+
+    logger.info(`[AI] Backend response status=200 provider=${parsed.provider || 'gemini'} model=${parsed.model || 'default'} fallback=${Boolean(parsed.fallback_used)}`);
 
     return {
       text:          parsed.text,
@@ -661,8 +679,9 @@ User's goal description:
 
     let text, provider;
     try {
-      ({ text, provider } = await this.callWithFallback(prompt));
+      ({ text, provider } = await this.callWithFallback(prompt, 'task_generation', true));
     } catch (err) {
+      logger.warn(`[AI] Falling back to OfflineEngine for task_generation: ${err.message}`);
       return OfflineEngine.generateTasks(userPrompt, context);
     }
 
@@ -671,8 +690,9 @@ User's goal description:
     try {
       const parsed = JSON.parse(cleaned);
       tasks = ProviderManager.extractArray(parsed, ['tasks', 'items', 'plan', 'payload']);
-      if (!Array.isArray(tasks)) throw new Error('not an array');
+      if (!Array.isArray(tasks)) throw new Error('Parsed payload does not contain an array of tasks');
     } catch (err) {
+      logger.warn(`[AI] Failed to parse generated task JSON, falling back to OfflineEngine: ${err.message}`);
       return OfflineEngine.generateTasks(userPrompt, context);
     }
 
@@ -680,7 +700,10 @@ User's goal description:
       .map(t => ProviderManager.normalizeGeneratedTask(t, { today }))
       .filter(Boolean);
 
-    if (validated.length === 0) return OfflineEngine.generateTasks(userPrompt, context);
+    if (validated.length === 0) {
+      logger.warn('[AI] Generated task list was empty after normalization, falling back to OfflineEngine');
+      return OfflineEngine.generateTasks(userPrompt, context);
+    }
     return { tasks: validated, provider };
   }
 
@@ -716,8 +739,9 @@ Respond ONLY with the JSON array.`;
 
     let text, provider;
     try {
-      ({ text, provider } = await this.callWithFallback(systemPrompt));
+      ({ text, provider } = await this.callWithFallback(systemPrompt, 'quick_session', true));
     } catch (err) {
+      logger.warn(`[AI] Falling back to OfflineEngine for quick_session: ${err.message}`);
       return OfflineEngine.generateQuickSession(prompt, context);
     }
 
@@ -798,8 +822,9 @@ Respond with ONLY a raw JSON array of blocks. No markdown, no explanation, no ex
 
     let text, provider;
     try {
-      ({ text, provider } = await this.callWithFallback(prompt));
+      ({ text, provider } = await this.callWithFallback(prompt, 'study_schedule', true));
     } catch (err) {
+      logger.warn(`[AI] Falling back to OfflineEngine for study_schedule: ${err.message}`);
       return OfflineEngine.generateSchedule({ hours, energy, priorities, startTime });
     }
 
@@ -810,6 +835,7 @@ Respond with ONLY a raw JSON array of blocks. No markdown, no explanation, no ex
       schedule = ProviderManager.extractArray(parsed, ['schedule', 'blocks', 'timetable', 'items']);
       if (!Array.isArray(schedule)) throw new Error('not an array');
     } catch (err) {
+      logger.warn(`[AI] Failed to parse schedule JSON, falling back to OfflineEngine: ${err.message}`);
       return OfflineEngine.generateSchedule({ hours, energy, priorities, startTime });
     }
 
@@ -867,8 +893,9 @@ No markdown, no explanation outside the JSON object.`;
 
     let text, provider;
     try {
-      ({ text, provider } = await this.callWithFallback(prompt));
+      ({ text, provider } = await this.callWithFallback(prompt, 'adaptive_replan', true));
     } catch (err) {
+      logger.warn(`[AI] Falling back to OfflineEngine for adaptive_replan: ${err.message}`);
       return OfflineEngine.generateReplan(instruction, currentTasks);
     }
 
@@ -938,8 +965,9 @@ No markdown, no explanation, just the JSON object.`;
 
     let text, provider;
     try {
-      ({ text, provider } = await this.callWithFallback(prompt));
+      ({ text, provider } = await this.callWithFallback(prompt, 'follow_up_coach', true));
     } catch (err) {
+      logger.warn(`[AI] Falling back to OfflineEngine for follow_up_coach: ${err.message}`);
       return OfflineEngine.followUpCoach({ taskTitle, completionPercent, estimatedMinutes });
     }
 
@@ -948,6 +976,7 @@ No markdown, no explanation, just the JSON object.`;
     try {
       result = JSON.parse(cleaned);
     } catch (err) {
+      logger.warn(`[AI] Failed to parse follow_up_coach JSON, falling back to OfflineEngine: ${err.message}`);
       return OfflineEngine.followUpCoach({ taskTitle, completionPercent, estimatedMinutes });
     }
 
@@ -1002,8 +1031,9 @@ Respond with ONLY the raw JSON array. No markdown, no explanation.`;
 
     let text, provider;
     try {
-      ({ text, provider } = await this.callWithFallback(prompt));
+      ({ text, provider } = await this.callWithFallback(prompt, 'goal_plan', true));
     } catch (err) {
+      logger.warn(`[AI] Falling back to OfflineEngine for goal_plan: ${err.message}`);
       return OfflineEngine.generateGoalPlan({ goalTitle, deadlineDays, description });
     }
 
@@ -1014,6 +1044,7 @@ Respond with ONLY the raw JSON array. No markdown, no explanation.`;
       templates = ProviderManager.extractArray(parsed, ['templates', 'activities', 'tasks', 'items']);
       if (!Array.isArray(templates)) throw new Error('not an array');
     } catch (err) {
+      logger.warn(`[AI] Failed to parse goal_plan JSON, falling back to OfflineEngine: ${err.message}`);
       return OfflineEngine.generateGoalPlan({ goalTitle, deadlineDays, description });
     }
 
@@ -1075,8 +1106,9 @@ No markdown, no explanation, just the JSON object.`;
 
     let text, provider;
     try {
-      ({ text, provider } = await this.callWithFallback(prompt));
+      ({ text, provider } = await this.callWithFallback(prompt, 'weekly_review', true));
     } catch (err) {
+      logger.warn(`[AI] Falling back to OfflineEngine for weekly_review: ${err.message}`);
       return OfflineEngine.generateWeeklyReviewNarrative(reviewData);
     }
 
@@ -1085,6 +1117,7 @@ No markdown, no explanation, just the JSON object.`;
     try {
       result = JSON.parse(cleaned);
     } catch (err) {
+      logger.warn(`[AI] Failed to parse weekly_review JSON, falling back to OfflineEngine: ${err.message}`);
       return OfflineEngine.generateWeeklyReviewNarrative(reviewData);
     }
 
@@ -1135,7 +1168,8 @@ Respond with ONLY a raw JSON array. No markdown, no explanation.`;
     try {
       ({ text, provider, parsed: milestones } = await this._callWithParseFallback(
         prompt,
-        (raw) => ProviderManager.parseRoadmapMilestones(raw, totalMonths)
+        (raw) => ProviderManager.parseRoadmapMilestones(raw, totalMonths),
+        'career_roadmap'
       ));
       logger.info(`[roadmap] Generated successfully via ${provider}`);
     } catch (err) {
@@ -1208,8 +1242,9 @@ Respond with ONLY a raw JSON object. No markdown, no explanation.`;
 
     let text, provider;
     try {
-      ({ text, provider } = await this.callWithFallback(prompt));
+      ({ text, provider } = await this.callWithFallback(prompt, 'exam_prep', true));
     } catch (err) {
+      logger.warn(`[AI] Falling back to OfflineEngine for exam_prep: ${err.message}`);
       return this._offlineExamPlan(examName, daysUntilExam);
     }
 
@@ -1219,6 +1254,7 @@ Respond with ONLY a raw JSON object. No markdown, no explanation.`;
       plan = JSON.parse(cleaned);
       if (typeof plan !== 'object' || !plan.daily_plan) throw new Error('malformed');
     } catch (err) {
+      logger.warn(`[AI] Failed to parse exam_prep JSON, falling back to OfflineEngine: ${err.message}`);
       return this._offlineExamPlan(examName, daysUntilExam);
     }
 
@@ -1321,8 +1357,9 @@ Respond with ONLY the raw JSON array. No markdown, no explanation.`;
 
     let text, provider;
     try {
-      ({ text, provider } = await this.callWithFallback(prompt));
+      ({ text, provider } = await this.callWithFallback(prompt, 'time_blocks', true));
     } catch (err) {
+      logger.warn(`[AI] Falling back to OfflineEngine for time_blocks: ${err.message}`);
       return this._offlineTimeBlocks(freeSlots, pendingTasks, energyLevel);
     }
 
@@ -1332,6 +1369,7 @@ Respond with ONLY the raw JSON array. No markdown, no explanation.`;
       blocks = JSON.parse(cleaned);
       if (!Array.isArray(blocks)) throw new Error('not an array');
     } catch (err) {
+      logger.warn(`[AI] Failed to parse time_blocks JSON, falling back to OfflineEngine: ${err.message}`);
       return this._offlineTimeBlocks(freeSlots, pendingTasks, energyLevel);
     }
 
@@ -1381,7 +1419,6 @@ Respond with ONLY the raw JSON array. No markdown, no explanation.`;
           consecutiveStudy = 0;
         }
       }
-
 
       const leftover = end - cur;
       if (leftover > 0) {
@@ -1455,8 +1492,9 @@ Respond with ONLY a raw JSON object. No markdown, no explanation.`;
 
     let text, provider;
     try {
-      ({ text, provider } = await this.callWithFallback(prompt));
+      ({ text, provider } = await this.callWithFallback(prompt, 'semester_plan', true));
     } catch (err) {
+      logger.warn(`[AI] Falling back to OfflineEngine for semester_plan: ${err.message}`);
       return this._offlineSemesterPlan(semesterName, subjects, startDate, endDate);
     }
 
@@ -1562,8 +1600,9 @@ ${skippedCategories?.length ? `- Often skips: ${skippedCategories.join(', ')}` :
 
     let text, provider;
     try {
-      ({ text, provider } = await this.callWithFallback(fullPrompt));
+      ({ text, provider } = await this.callWithFallback(fullPrompt, 'coach_chat', false));
     } catch (err) {
+      logger.info(`[provider-manager] Coach chat falling back to offline engine: ${err.message}`);
       return OfflineEngine.coachReply(userMessage, coachContext);
     }
 

@@ -3789,7 +3789,8 @@ async function renderCoachChat(container) {
     window.studyflow.db('getAllSettings')
   ]);
   const messages = res.messages || [];
-  const name     = (settingsRes.data && settingsRes.data.user_name) || 'Student';
+  const activeUser = App.currentUser || window.SessionManager?.getUser?.();
+  const name     = activeUser?.full_name || activeUser?.name || (settingsRes.data && settingsRes.data.user_name) || 'Student';
 
   container.innerHTML = `
     <div class="page-header">
